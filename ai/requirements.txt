@@ -1,0 +1,30 @@
+# Vidatron - Voice Assistant Dependencies
+#
+# openWakeWord pulls "tflite-runtime" on Linux, but that package has no wheels for
+# Python 3.12+ (and often not for aarch64). Install deps below, then install
+# openWakeWord without its broken metadata deps:
+#
+#   pip install -r requirements.txt
+#   pip install "openwakeword>=0.5.0" --no-deps
+#
+
+# Core
+numpy>=1.24.0
+scipy>=1.10.0
+kivy>=2.2.0
+sounddevice>=0.4.6
+
+# openWakeWord runtime (required when using: pip install openwakeword --no-deps)
+onnxruntime>=1.10.0,<2
+tqdm>=4.0,<5
+scikit-learn>=1.0,<2
+
+# AI/ML
+piper-tts>=1.2.0
+httpx>=0.25.0
+
+# Optional: only if you use Python OpenAI Whisper instead of whisper.cpp
+# openai-whisper>=20231117
+
+# Utils
+python-dotenv>=1.0.0

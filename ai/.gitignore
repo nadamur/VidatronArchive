@@ -1,0 +1,40 @@
+# Environment variables (contains API keys)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv*/
+.venv/
+
+# Whisper.cpp build artifacts (large - build from source)
+whisper.cpp/
+
+# Large model files (downloaded separately)
+piper/voices/*.onnx
+models/wake_word/*.onnx
+*.tflite
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+*.wav
+!assets/fillers/*.wav

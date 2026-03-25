@@ -1,0 +1,72 @@
+{
+  "first_time_setup_complete": true,
+  "face_customization": {
+    "selected_eyes": "Round",
+    "selected_mouth": "Curved"
+  },
+  "font_settings": {
+    "style": "Roboto",
+    "size": 30
+  },
+  "default_colors": {
+    "primary": [
+      0.1,
+      0.9,
+      1.0,
+      1.0
+    ],
+    "background": [
+      0.02,
+      0.02,
+      0.04,
+      1.0
+    ]
+  },
+  "reminders": [
+    {
+      "id": "b98e8401-6b74-490f-8e18-8864c84b7b68",
+      "text": "Drink water",
+      "icon": null,
+      "icon_path": "assets/icons/drink_water.png",
+      "face_expression": null,
+      "trigger_type": "Every X Minutes",
+      "trigger_time": null,
+      "interval_minutes": 1,
+      "repeat_settings": "daily",
+      "is_active": true,
+      "accent": [
+        0.1,
+        0.9,
+        1.0,
+        1.0
+      ],
+      "mood": "happy",
+      "description": "Stay hydrated!"
+    },
+    {
+      "id": "be4878f8-63d7-456f-9599-4279cfe71116",
+      "text": "Get up and stretch",
+      "icon": null,
+      "icon_path": "assets/icons/stretch.png",
+      "face_expression": null,
+      "trigger_type": "Every X Minutes",
+      "trigger_time": null,
+      "interval_minutes": 2,
+      "repeat_settings": "daily",
+      "is_active": true,
+      "accent": [
+        0.15,
+        1.0,
+        0.55,
+        1.0
+      ],
+      "mood": "calm",
+      "description": "Take a break and move around"
+    }
+  ],
+  "last_fired": {
+    "b98e8401-6b74-490f-8e18-8864c84b7b68": 1774405058.467333,
+    "be4878f8-63d7-456f-9599-4279cfe71116": 1774405058.467333
+  },
+  "default_reminders_added": true
+}
