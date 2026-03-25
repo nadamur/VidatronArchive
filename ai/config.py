@@ -57,8 +57,10 @@ class Config:
     local_soul_path: str = ""
     cloud_soul_path: str = ""
 
-    # Editable JSON: name, music prefs, notes (see data/user_profile.json)
-    user_profile_path: str = ""
+    # Persistent chat (JSONL) for Groq/Ollama context — see data/chat_history.jsonl
+    chat_history_path: str = ""
+    chat_history_max_stored: int = 500
+    chat_history_max_context: int = 24
 
     # Display
     display_width: int = 800
@@ -92,6 +94,8 @@ class Config:
             self.local_soul_path = os.path.join(self.project_root, "config", "local_soul.md")
         if not self.cloud_soul_path:
             self.cloud_soul_path = os.path.join(self.project_root, "config", "cloud_soul.md")
+        if not self.chat_history_path:
+            self.chat_history_path = os.path.join(self.project_root, "data", "chat_history.jsonl")
 
     @classmethod
     def load(cls, config_path: Optional[str] = None) -> "Config":
@@ -153,10 +157,16 @@ class Config:
             "SPOTIFY_DEVICE_ID",
             config.spotify_device_id,
         )
-        config.user_profile_path = os.getenv(
-            "VIDATRON_USER_PROFILE",
-            config.user_profile_path,
+        config.chat_history_path = os.getenv(
+            "VIDATRON_CHAT_HISTORY",
+            config.chat_history_path,
         )
+        _mctx = os.getenv("VIDATRON_CHAT_HISTORY_MAX_CONTEXT", "").strip()
+        if _mctx.isdigit():
+            config.chat_history_max_context = int(_mctx)
+        _mstore = os.getenv("VIDATRON_CHAT_HISTORY_MAX_STORED", "").strip()
+        if _mstore.isdigit():
+            config.chat_history_max_stored = int(_mstore)
 
         return config
 

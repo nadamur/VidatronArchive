@@ -4,7 +4,7 @@ Includes text-based tool detection fallback for smaller models.
 """
 
 import re
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
@@ -80,13 +80,8 @@ class Router:
         "give me ideas", "suggest", "recommend", "advice",
     ]
 
-    def __init__(
-        self,
-        ollama_client: OllamaClient,
-        user_profile_getter: Optional[Callable[[], str]] = None,
-    ):
+    def __init__(self, ollama_client: OllamaClient):
         self.client = ollama_client
-        self.user_profile_getter = user_profile_getter
         self.conversation_history = []
 
     def _is_local_chat(self, user_input: str) -> bool:
@@ -379,10 +374,6 @@ class Router:
                 "You are Vidatron, a friendly healthy lifestyle AI assistant. When asked who you are, "
                 "say you are Vidatron, a healthy lifestyle robot and AI assistant. Keep responses SHORT (1-2 sentences)."
             )
-            if self.user_profile_getter:
-                ctx = (self.user_profile_getter() or "").strip()
-                if ctx:
-                    system += "\n\n--- User facts ---\n" + ctx
             messages = [{"role": "system", "content": system}]
             messages.extend(self.conversation_history[-4:])
             messages.append({"role": "user", "content": user_input})

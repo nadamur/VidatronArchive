@@ -82,7 +82,7 @@ from brain.tools.weather_tool import WeatherTool
 from brain.tools.news_tool import NewsTool
 from brain.tools.spotify_tool import SpotifyError, SpotifyTool
 from brain.groq_client import GroqClient
-from brain.user_profile import UserProfileStore
+from brain.chat_history import ChatHistoryStore
 from audio.subprocess_playback import SubprocessWavPlayer
 from audio.stt_engine import sanitize_whisper_output
 from audio.tts_engine import PiperTTS
@@ -449,16 +449,17 @@ class VidatronEngine(EventDispatcher):
 
         self._face_paths = self._build_face_paths()
         self.config = AppConfig.load()
-        self.user_profile = UserProfileStore(self.config.user_profile_path)
-        print(f"  User profile file: {self.config.user_profile_path}")
+        self.chat_history = ChatHistoryStore(
+            self.config.chat_history_path,
+            max_stored_messages=self.config.chat_history_max_stored,
+            max_context_messages=self.config.chat_history_max_context,
+        )
+        print(f"  Chat history file: {self.config.chat_history_path}")
 
         print("Initializing AI components...")
         print(f"  Loading Ollama ({self.config.chat_model})...")
         self.ollama = OllamaClient(model=self.config.chat_model)
-        self.router = Router(
-            self.ollama,
-            user_profile_getter=lambda: self.user_profile.format_for_prompt(),
-        )
+        self.router = Router(self.ollama)
         print("  Warming up local model...")
         try:
             self.ollama.ensure_model_loaded()
@@ -560,11 +561,16 @@ class VidatronEngine(EventDispatcher):
         self._sync_ui_state()
         print("✓ UI Ready!")
 
-    def _ollama_system_with_profile(self, base: str) -> str:
-        ctx = self.user_profile.format_for_prompt()
-        if ctx:
-            return f"{base}\n\n--- User facts (remember these) ---\n{ctx}"
-        return base
+    def _ollama_messages_cloud_fallback(self, user_text: str) -> list:
+        """Ollama path when Groq is unavailable: system + saved chat + current user."""
+        base = (
+            "You are Vidatron, a healthy lifestyle robot and AI assistant. "
+            "Give a concise answer in 1-3 sentences."
+        )
+        msgs = [{"role": "system", "content": base}]
+        msgs.extend(self.chat_history.messages_for_api())
+        msgs.append({"role": "user", "content": user_text})
+        return msgs
 
     def start_terminal_prompt_loop(self):
         """Background thread: type prompts at You> (alongside wake word + mic when enabled)."""
@@ -627,7 +633,6 @@ class VidatronEngine(EventDispatcher):
 
         self._main_thread(set_user)
         print(f"  You typed: {text}")
-        self.user_profile.learn_from_text(text)
 
         try:
             result_rt = self.router.route(text)
@@ -680,22 +685,21 @@ class VidatronEngine(EventDispatcher):
                     response = self.cloud.chat(
                         query,
                         stream=False,
-                        user_profile_context=self.user_profile.format_for_prompt(),
+                        history=self.chat_history.messages_for_api(),
                     )
                 else:
-                    messages = [
-                        {
-                            "role": "system",
-                            "content": self._ollama_system_with_profile(
-                                "You are Vidatron, a healthy lifestyle robot and AI assistant. Give a concise answer in 1-3 sentences."
-                            ),
-                        },
-                        {"role": "user", "content": text},
-                    ]
+                    query = result_rt.arguments.get("query", text)
+                    messages = self._ollama_messages_cloud_fallback(query)
                     local_response = self.ollama.chat(messages, tools=None)
                     response = local_response.content or "I'm not sure about that."
             else:
                 response = result_rt.response or "I'm not sure how to respond to that."
+
+            if result_rt.tool == ToolType.CLOUD and response:
+                self.chat_history.append_exchange(
+                    result_rt.arguments.get("query", text),
+                    response,
+                )
 
             print(f"  Bot: {response[:80]}...")
 
@@ -1454,7 +1458,6 @@ class VidatronEngine(EventDispatcher):
 
             self._main_thread(set_user, text)
             print(f"  You said: {text}")
-            self.user_profile.learn_from_text(text)
 
             result_rt = self.router.route(text)
             print(f"  Router selected: {result_rt.tool.name} (args: {result_rt.arguments})")
@@ -1530,7 +1533,7 @@ class VidatronEngine(EventDispatcher):
                             response = self.cloud.chat(
                                 query,
                                 stream=False,
-                                user_profile_context=self.user_profile.format_for_prompt(),
+                                history=self.chat_history.messages_for_api(),
                             )
                             break
                         except Exception as e:
@@ -1560,15 +1563,8 @@ class VidatronEngine(EventDispatcher):
                             return
                         print("  [fallback] Using local model...")
                         try:
-                            messages = [
-                                {
-                                    "role": "system",
-                                    "content": self._ollama_system_with_profile(
-                                        "You are Vidatron, a healthy lifestyle robot and AI assistant. Give a concise answer in 1-3 sentences."
-                                    ),
-                                },
-                                {"role": "user", "content": text},
-                            ]
+                            query_fb = result_rt.arguments.get("query", text)
+                            messages = self._ollama_messages_cloud_fallback(query_fb)
                             local_response = self.ollama.chat(messages, tools=None)
                             response = local_response.content or "I'm not sure about that."
                         except Exception:
@@ -1576,21 +1572,20 @@ class VidatronEngine(EventDispatcher):
                 else:
                     print("  [local fallback] No cloud configured...")
                     try:
-                        messages = [
-                            {
-                                "role": "system",
-                                "content": self._ollama_system_with_profile(
-                                    "You are Vidatron, a healthy lifestyle robot and AI assistant. Give a concise answer in 1-3 sentences."
-                                ),
-                            },
-                            {"role": "user", "content": text},
-                        ]
+                        query_fb = result_rt.arguments.get("query", text)
+                        messages = self._ollama_messages_cloud_fallback(query_fb)
                         local_response = self.ollama.chat(messages, tools=None)
                         response = local_response.content or "I'm not sure about that."
                     except Exception:
                         response = "That's a complex question. I'm having trouble answering right now."
             else:
                 response = result_rt.response or "I'm not sure how to respond to that."
+
+            if result_rt.tool == ToolType.CLOUD and response:
+                self.chat_history.append_exchange(
+                    result_rt.arguments.get("query", text),
+                    response,
+                )
 
             if my_request_id != self.current_request_id:
                 print("  ⏹ Request cancelled (new question detected)")

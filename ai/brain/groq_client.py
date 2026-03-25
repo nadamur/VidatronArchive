@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Generator, Optional, Union
+from typing import Generator, List, Optional, Union
 
 import httpx
 
@@ -45,19 +45,16 @@ class GroqClient:
         self,
         query: str,
         stream: bool = True,
-        user_profile_context: str = "",
+        history: Optional[List[dict[str, str]]] = None,
     ) -> Union[Generator[str, None, None], str]:
         messages = []
-        system_parts: list[str] = []
         if self.soul_prompt:
-            system_parts.append(self.soul_prompt)
-        up = (user_profile_context or "").strip()
-        if up:
-            system_parts.append(
-                "--- User facts (use when relevant; do not contradict) ---\n" + up
-            )
-        if system_parts:
-            messages.append({"role": "system", "content": "\n\n".join(system_parts)})
+            messages.append({"role": "system", "content": self.soul_prompt})
+        for h in history or []:
+            role = h.get("role")
+            content = h.get("content")
+            if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+                messages.append({"role": role, "content": content})
         messages.append({"role": "user", "content": query})
 
         payload = {

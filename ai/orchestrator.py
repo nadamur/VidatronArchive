@@ -28,7 +28,7 @@ from brain.tools.system_tool import get_system_status
 from brain.tools.joke_tool import get_joke
 from brain.tools.spotify_tool import SpotifyTool, SpotifyError
 from brain.groq_client import GroqClient
-from brain.user_profile import UserProfileStore
+from brain.chat_history import ChatHistoryStore
 from senses.wake_word_detector import WakeWordDetector
 
 # Pre-generated filler WAVs in assets/fillers/
@@ -72,14 +72,15 @@ class Orchestrator:
         print("  - Ollama client")
         self.ollama = OllamaClient(model=config.chat_model)
 
-        self.user_profile = UserProfileStore(config.user_profile_path)
-        print(f"  - User profile ({config.user_profile_path})")
+        self.chat_history = ChatHistoryStore(
+            config.chat_history_path,
+            max_stored_messages=config.chat_history_max_stored,
+            max_context_messages=config.chat_history_max_context,
+        )
+        print(f"  - Chat history ({config.chat_history_path})")
 
         print("  - Router")
-        self.router = Router(
-            self.ollama,
-            user_profile_getter=lambda: self.user_profile.format_for_prompt(),
-        )
+        self.router = Router(self.ollama)
 
         # Tools (optional, may fail if API keys not set)
         self.weather = None
@@ -312,7 +313,6 @@ class Orchestrator:
             )
             return
 
-        self.user_profile.learn_from_text(text)
         result = self.router.route(text)
 
         if result.tool == ToolType.NONE:
@@ -395,8 +395,9 @@ class Orchestrator:
             response = self.cloud.chat(
                 query,
                 stream=False,
-                user_profile_context=self.user_profile.format_for_prompt(),
+                history=self.chat_history.messages_for_api(),
             )
+            self.chat_history.append_exchange(query, response)
             self._speak(response)
         except Exception as e:
             print(f"Cloud error: {e}")
