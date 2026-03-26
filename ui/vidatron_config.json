@@ -2,7 +2,7 @@
   "first_time_setup_complete": true,
   "face_customization": {
     "selected_eyes": "Round",
-    "selected_mouth": "Curved"
+    "selected_mouth": "Small"
   },
   "font_settings": {
     "style": "Roboto",
@@ -16,9 +16,9 @@
       1.0
     ],
     "background": [
-      0.02,
-      0.02,
-      0.04,
+      0.38,
+      0.55,
+      0.82,
       1.0
     ]
   },
@@ -33,7 +33,7 @@
       "trigger_time": null,
       "interval_minutes": 1,
       "repeat_settings": "daily",
-      "is_active": true,
+      "is_active": false,
       "accent": [
         0.1,
         0.9,
@@ -44,8 +44,9 @@
       "description": "Stay hydrated!"
     },
     {
-      "id": "be4878f8-63d7-456f-9599-4279cfe71116",
+      "id": "0c255a74-5ac3-47c5-a37a-a01fec899dba",
       "text": "Get up and stretch",
+      "action": "stretch",
       "icon": null,
       "icon_path": "assets/icons/stretch.png",
       "face_expression": null,
@@ -65,8 +66,9 @@
     }
   ],
   "last_fired": {
-    "b98e8401-6b74-490f-8e18-8864c84b7b68": 1774476097.569589,
-    "be4878f8-63d7-456f-9599-4279cfe71116": 1774476097.569589
+    "b98e8401-6b74-490f-8e18-8864c84b7b68": 1774487681.667699,
+    "be4878f8-63d7-456f-9599-4279cfe71116": 1774487832.338094,
+    "0c255a74-5ac3-47c5-a37a-a01fec899dba": 1774495219.913602
   },
   "default_reminders_added": true
 }

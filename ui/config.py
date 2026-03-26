@@ -6,6 +6,8 @@ Handles saving and loading application configuration.
 
 import json
 import os
+import sys
+import types
 import uuid
 
 
@@ -185,5 +187,22 @@ class ConfigManager:
             self.save_config()
 
 
-# Global config manager instance
-config_manager = ConfigManager()
+def _process_wide_config_manager():
+    """
+    Single ConfigManager for the whole process.
+
+    This module is often loaded twice (importlib + different fake module names from
+    ``screens.py`` and ``ai/test_ui.py``). A plain ``config_manager = ConfigManager()``
+    would create two instances: UI saves would update one while the voice screen's
+    ``_refresh_ui`` would keep overwriting face/theme from a stale copy.
+    """
+    key = "vidatron._shared_config_manager"
+    mod = sys.modules.get(key)
+    if mod is None:
+        mod = types.ModuleType(key)
+        mod.config_manager = ConfigManager()
+        sys.modules[key] = mod
+    return mod.config_manager
+
+
+config_manager = _process_wide_config_manager()

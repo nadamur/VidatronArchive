@@ -5,6 +5,7 @@ Custom UI widgets for the Vidatron application.
 """
 
 from kivy.clock import Clock
+from kivy.properties import ListProperty, StringProperty
 from kivy.uix.widget import Widget
 from kivy.graphics import Color, RoundedRectangle, Ellipse, Line, Rectangle
 from kivy.metrics import dp
@@ -133,30 +134,39 @@ class Face(Widget):
             # Only draw eyes if not None
             if self.selected_eyes is not None:
                 eye_scale = 1.0
+                eye_h_mul = 1.0
                 eye_offset_y = 0.0
-                
-                # Apply eye style customization (at least 3 options)
+                pr_mul = 1.0
+
                 if self.selected_eyes == "Round":
-                    eye_scale = 1.0  # Default round
+                    pass
                 elif self.selected_eyes == "Oval":
-                    eye_scale = 1.2  # Wider oval
-                    eye_offset_y = -eye_r * 0.1
+                    eye_scale = 1.35
+                    eye_h_mul = 0.9
+                    eye_offset_y = -eye_r * 0.12
                 elif self.selected_eyes == "Narrow":
-                    eye_scale = 0.85  # Narrower
+                    eye_scale = 0.56
+                    eye_h_mul = 1.12
+                    eye_offset_y = -eye_r * 0.04
+                    pr_mul = 0.9
                 elif self.selected_eyes == "Wide":
-                    eye_scale = 1.3  # Very wide
-                    eye_offset_y = -eye_r * 0.15
+                    eye_scale = 1.42
+                    eye_h_mul = 0.88
+                    eye_offset_y = -eye_r * 0.1
+                    pr_mul = 1.05
                 elif self.selected_eyes == "Small":
-                    eye_scale = 0.7  # Smaller eyes
-                
+                    eye_scale = 0.68
+                    eye_h_mul = 0.68
+                    pr_mul = 0.78
+
                 Color(1, 1, 1, 0.96)
                 eye_w = eye_r * 2 * eye_scale
-                eye_h = eye_r * 2
-                Ellipse(pos=(lx + (eye_r*2 - eye_w)/2, eye_y-eye_r + eye_offset_y), size=(eye_w, eye_h))
-                Ellipse(pos=(rx + (eye_r*2 - eye_w)/2, eye_y-eye_r + eye_offset_y), size=(eye_w, eye_h))
+                eye_h = eye_r * 2 * eye_h_mul
+                Ellipse(pos=(lx + (eye_r * 2 - eye_w) / 2, eye_y - eye_r + eye_offset_y), size=(eye_w, eye_h))
+                Ellipse(pos=(rx + (eye_r * 2 - eye_w) / 2, eye_y - eye_r + eye_offset_y), size=(eye_w, eye_h))
 
                 # Pupils
-                pr = eye_r*0.35
+                pr = eye_r * 0.35 * pr_mul
                 Color(0.05, 0.06, 0.08, 1.0)
                 Ellipse(pos=(lx+eye_r-pr+pupil_dx, eye_y-pr+pupil_dy), size=(pr*2, pr*2))
                 Ellipse(pos=(rx+eye_r-pr+pupil_dx, eye_y-pr+pupil_dy), size=(pr*2, pr*2))
@@ -179,17 +189,15 @@ class Face(Widget):
                 mouth_style = self.selected_mouth
                 
                 if mouth_style == "Wide":
-                    mouth_w = cw * 0.50  # Wider mouth
+                    mouth_w = cw * 0.52
                 elif mouth_style == "Small":
-                    mouth_w = cw * 0.30  # Smaller mouth
-                elif mouth_style == "Expressive":
-                    mouth_w = cw * 0.45  # Slightly wider
+                    mouth_w = cw * 0.28
                 elif mouth_style == "Neutral":
-                    mouth_w = cw * 0.35  # Neutral size
-                elif mouth_style in ("Curved", "Smile"):
-                    mouth_w = cw * 0.42  # Curved / smile style
+                    mouth_w = cw * 0.38
+                elif mouth_style in ("Curved", "Smile", "Expressive"):
+                    mouth_w = cw * 0.42
                 else:
-                    mouth_w = cw * 0.40  # Default (Round or unknown)
+                    mouth_w = cw * 0.40
                 
                 mx = cx + (cw-mouth_w)/2
                 
@@ -236,9 +244,27 @@ class Face(Widget):
                             size=(bubble_r * 2, bubble_r * 2),
                         )
                 elif self.mood in ("happy", "wink"):
-                    # Smile
-                    Line(bezier=[mx, my+mouth_h*0.42, mx+mouth_w*0.25, my, mx+mouth_w*0.75, my, mx+mouth_w, my+mouth_h*0.42],
-                         width=7, cap="round")
+                    if mouth_style == "Neutral":
+                        Line(
+                            points=[mx, my + mouth_h * 0.26, mx + mouth_w, my + mouth_h * 0.26],
+                            width=7,
+                            cap="round",
+                        )
+                    else:
+                        Line(
+                            bezier=[
+                                mx,
+                                my + mouth_h * 0.42,
+                                mx + mouth_w * 0.25,
+                                my,
+                                mx + mouth_w * 0.75,
+                                my,
+                                mx + mouth_w,
+                                my + mouth_h * 0.42,
+                            ],
+                            width=7,
+                            cap="round",
+                        )
                 elif self.mood == "calm":
                     # Neutral line
                     Line(points=[mx, my+mouth_h*0.25, mx+mouth_w, my+mouth_h*0.25], width=7, cap="round")
@@ -249,34 +275,30 @@ class Face(Widget):
 
 class StickFigureIcon(Widget):
     """
-    Kivy-drawn stick figure icon representing an action (e.g. drink, stretch).
-    Uses the same colored background as the Face (accent-derived) so the area is not black.
+    Kivy-drawn stick figure for a healthy-reminder action (drink, stretch, wave, …).
+    Uses the same panel framing as Face; updates ~30 FPS when visible for simple motion.
     """
+
+    action = StringProperty("stretch")
+    accent = ListProperty([0.10, 0.90, 1.00, 1.0])
+
     def __init__(self, action="stretch", accent=(0.10, 0.90, 1.00, 1.0), **kwargs):
+        ac = accent if isinstance(accent, (tuple, list)) and len(accent) >= 3 else [0.10, 0.90, 1.00, 1.0]
+        if len(ac) == 3:
+            ac = [*map(float, ac[:3]), 1.0]
+        kwargs.setdefault("action", action)
+        kwargs.setdefault("accent", [float(ac[i]) for i in range(4)])
         super().__init__(**kwargs)
-        self._action = action
-        self._accent = accent if isinstance(accent, (tuple, list)) and len(accent) >= 4 else (0.10, 0.90, 1.00, 1.0)
+        self._phase = 0.0
         self.bind(size=self._draw, pos=self._draw)
+        self.bind(action=self._draw, accent=self._draw)
+        Clock.schedule_interval(self._anim_tick, 1 / 30.0)
 
-    @property
-    def action(self):
-        return self._action
-
-    @action.setter
-    def action(self, value):
-        if value != self._action:
-            self._action = value
-            self._draw()
-
-    @property
-    def accent(self):
-        return self._accent
-
-    @accent.setter
-    def accent(self, value):
-        if value != self._accent:
-            self._accent = value if isinstance(value, (tuple, list)) and len(value) >= 4 else (0.10, 0.90, 1.00, 1.0)
-            self._draw()
+    def _anim_tick(self, dt):
+        if self.opacity < 0.01:
+            return
+        self._phase += dt * 5.0
+        self._draw()
 
     def _draw(self, *args):
         self.canvas.clear()
@@ -284,12 +306,17 @@ class StickFigureIcon(Widget):
         w, h = self.size
         if w <= 0 or h <= 0:
             return
-        r, g, b, a = self._accent
+        ac = self.accent
+        if len(ac) < 3:
+            r, g, b, a = (0.10, 0.90, 1.00, 1.0)
+        else:
+            r, g, b = float(ac[0]), float(ac[1]), float(ac[2])
+            a = float(ac[3] if len(ac) > 3 else 1.0)
+        ph = self._phase
         pad = 16
         cx, cy = x + pad, y + pad
         cw, ch = w - 2 * pad, h - 2 * pad
         base = (0.07 + r * 0.70, 0.07 + g * 0.70, 0.07 + b * 0.70, 1.0)
-        # Same background as Face so it's a color, not black
         with self.canvas:
             Color(0.02, 0.02, 0.04, 1.0)
             RoundedRectangle(pos=(x, y), size=(w, h), radius=[22])
@@ -299,50 +326,168 @@ class StickFigureIcon(Widget):
             RoundedRectangle(pos=(cx, cy), size=(cw, ch), radius=[26])
             Color(1, 1, 1, 0.18)
             Line(rounded_rectangle=(cx, cy, cw, ch, 26), width=2)
-        # Stick figure on top
+
         def px(nx, ny):
             return (x + nx * w, y + ny * h)
-        line_w = max(2, dp(4))
-        if self._action == "drink":
-            self._draw_drink(px, w, h, line_w)
-        else:
-            self._draw_stretch(px, w, h, line_w)
 
-    def _draw_drink(self, px, w, h, line_w):
-        """Stick figure with cup to mouth (drink water)."""
+        line_w = max(2, dp(4))
+        act = (self.action or "wave").strip().lower()
+        if act == "drink":
+            self._draw_drink(px, w, h, line_w, ph)
+        elif act == "stretch":
+            self._draw_stretch(px, w, h, line_w, ph)
+        else:
+            self._draw_wave(px, w, h, line_w, ph)
+
+    def _draw_drink(self, px, w, h, line_w, ph):
+        """Stick figure bringing cup to mouth — sipping motion."""
         cx, cy = 0.5, 0.5
         head_r = 0.08
-        # Head
+        lift = 0.035 * max(0.0, sin(ph))
+        sway = 0.03 * sin(ph * 0.9)
         self.canvas.add(Color(1, 1, 1, 0.95))
-        self.canvas.add(Ellipse(pos=px(cx - head_r, cy + 0.28 - head_r), size=(2*head_r*w, 2*head_r*h)))
-        # Body (neck to pelvis)
+        self.canvas.add(
+            Ellipse(
+                pos=px(cx - head_r + sway * 0.3, cy + 0.28 - head_r),
+                size=(2 * head_r * w, 2 * head_r * h),
+            )
+        )
         self.canvas.add(Line(points=px(cx, cy + 0.20) + px(cx, cy - 0.12), width=line_w, cap="round"))
-        # Arm with cup: shoulder -> elbow (near mouth) -> hand/cup
-        self.canvas.add(Line(points=px(cx, cy + 0.14) + px(cx + 0.12, cy + 0.18) + px(cx + 0.18, cy + 0.22), width=line_w, cap="round"))
-        # Cup (small rectangle at mouth level)
+        # Shorter reach to cup (upper arm + forearm both pulled in vs original pose)
+        ex0, ey0 = cx + 0.095 + sway, cy + 0.168 + lift
+        ex1, ey1 = cx + 0.142 + sway * 1.05, cy + 0.202 + lift
+        self.canvas.add(
+            Line(points=px(cx, cy + 0.14) + px(ex0, ey0) + px(ex1, ey1), width=line_w, cap="round")
+        )
         cup_w, cup_h = 0.06 * w, 0.08 * h
-        cup_x, cup_y = px(cx + 0.14, cy + 0.18)
-        self.canvas.add(Rectangle(pos=(cup_x, cup_y), size=(cup_w, cup_h)))
-        # Other arm down
+        cpx, cpy = px(ex0 - 0.015, ey0 - 0.018)
+        self.canvas.add(Color(0.92, 0.94, 1.0, 0.95))
+        self.canvas.add(Rectangle(pos=(cpx, cpy), size=(cup_w, cup_h)))
+        self.canvas.add(Color(1, 1, 1, 0.95))
         self.canvas.add(Line(points=px(cx, cy + 0.14) + px(cx - 0.08, cy - 0.05), width=line_w, cap="round"))
-        # Legs
         self.canvas.add(Line(points=px(cx, cy - 0.12) + px(cx - 0.10, cy - 0.38), width=line_w, cap="round"))
         self.canvas.add(Line(points=px(cx, cy - 0.12) + px(cx + 0.10, cy - 0.38), width=line_w, cap="round"))
 
-    def _draw_stretch(self, px, w, h, line_w):
-        """Stick figure in side stretch pose (arm up, body bent)."""
+    def _draw_stretch(self, px, w, h, line_w, ph):
+        """Overhead stretch — reach up, slight torso bend, gentle knee flex."""
         cx, cy = 0.5, 0.5
-        head_r = 0.08
+        head_r = 0.075
+
+        # Animate: reach upward + tiny torso sway
+        stretch_u = 0.5 + 0.5 * sin(ph * 0.75)  # 0..1
+        reach = 0.06 + 0.06 * stretch_u
+        sway = 0.02 * sin(ph * 0.45)
+
         # Head
         self.canvas.add(Color(1, 1, 1, 0.95))
-        self.canvas.add(Ellipse(pos=px(cx - head_r, cy + 0.22 - head_r), size=(2*head_r*w, 2*head_r*h)))
-        # Torso bent to left (viewer's left): upper then lower
-        self.canvas.add(Line(points=px(cx, cy + 0.14) + px(cx - 0.06, cy + 0.02), width=line_w, cap="round"))
-        self.canvas.add(Line(points=px(cx - 0.06, cy + 0.02) + px(cx - 0.04, cy - 0.14), width=line_w, cap="round"))
-        # Arm up over head (stretch)
-        self.canvas.add(Line(points=px(cx, cy + 0.14) + px(cx + 0.02, cy + 0.20) + px(cx + 0.14, cy + 0.24), width=line_w, cap="round"))
-        # Arm at hip
-        self.canvas.add(Line(points=px(cx - 0.06, cy + 0.02) + px(cx - 0.18, cy - 0.02), width=line_w, cap="round"))
-        # Legs
-        self.canvas.add(Line(points=px(cx - 0.04, cy - 0.14) + px(cx - 0.14, cy - 0.38), width=line_w, cap="round"))
-        self.canvas.add(Line(points=px(cx - 0.04, cy - 0.14) + px(cx + 0.08, cy - 0.36), width=line_w, cap="round"))
+        self.canvas.add(
+            Ellipse(
+                pos=px(cx - head_r + sway * 0.4, cy + 0.245 - head_r),
+                size=(2 * head_r * w, 2 * head_r * h),
+            )
+        )
+
+        # Torso (slight forward curve)
+        shoulder_y = cy + 0.14
+        hip_y = cy - 0.12
+        torso_x_top = cx + sway
+        torso_x_bot = cx + sway * 0.5 + 0.02 * stretch_u
+        self.canvas.add(
+            Line(
+                points=px(torso_x_top, shoulder_y) + px(torso_x_bot, hip_y),
+                width=line_w,
+                cap="round",
+            )
+        )
+
+        # Arms:
+        # 1) Overhead reaching arm (dominant)
+        # Start both arms exactly at the same shoulder joint as the spine top.
+        sh_x = torso_x_top
+        sh_y = shoulder_y
+        elbow_x = cx + 0.09 + sway * 0.15
+        elbow_y = cy + 0.16 + reach * 0.55
+        hand_x = cx + 0.135 + sway * 0.2
+        hand_y = cy + 0.27 + reach
+        self.canvas.add(
+            Line(
+                points=px(sh_x, sh_y)
+                + px(elbow_x, elbow_y)
+                + px(hand_x, hand_y),
+                width=line_w,
+                cap="round",
+            )
+        )
+        # 2) Other arm down (supporting arm)
+        other_elbow_x = cx - 0.03 + sway * 0.1
+        other_elbow_y = cy + 0.08 + 0.01 * reach
+        other_hand_x = cx - 0.09 + sway * 0.1
+        other_hand_y = cy - 0.02 - 0.01 * reach
+        self.canvas.add(
+            Line(
+                points=px(torso_x_top, shoulder_y)
+                + px(other_elbow_x, other_elbow_y)
+                + px(other_hand_x, other_hand_y),
+                width=line_w,
+                cap="round",
+            )
+        )
+
+        # Legs: one more straight, one slightly flexing at knee/ankle
+        hip_y2 = hip_y
+        # Left leg (flex)
+        # Start both legs at the spine bottom joint.
+        left_hip_x = torso_x_bot
+        left_knee_x = cx - 0.07 + sway * 0.05
+        left_knee_y = cy - 0.26 + 0.06 * stretch_u
+        left_foot_x = cx - 0.02 + sway * 0.08
+        left_foot_y = cy - 0.40 + 0.02 * stretch_u
+        self.canvas.add(
+            Line(
+                points=px(left_hip_x, hip_y2)
+                + px(left_knee_x, left_knee_y)
+                + px(left_foot_x, left_foot_y),
+                width=line_w,
+                cap="round",
+            )
+        )
+        # Right leg (support)
+        right_hip_x = torso_x_bot
+        right_knee_x = cx + 0.02 + sway * 0.05
+        right_knee_y = cy - 0.28 + 0.03 * stretch_u
+        right_foot_x = cx + 0.08 + sway * 0.08
+        right_foot_y = cy - 0.40 + 0.01 * stretch_u
+        self.canvas.add(
+            Line(
+                points=px(right_hip_x, hip_y2)
+                + px(right_knee_x, right_knee_y)
+                + px(right_foot_x, right_foot_y),
+                width=line_w,
+                cap="round",
+            )
+        )
+
+    def _draw_wave(self, px, w, h, line_w, ph):
+        """Friendly wave for generic / custom reminders."""
+        cx, cy = 0.5, 0.5
+        head_r = 0.08
+        wave = 0.38 * sin(ph * 2.2)
+        self.canvas.add(Color(1, 1, 1, 0.95))
+        self.canvas.add(Ellipse(pos=px(cx - head_r, cy + 0.25 - head_r), size=(2 * head_r * w, 2 * head_r * h)))
+        self.canvas.add(Line(points=px(cx, cy + 0.17) + px(cx, cy - 0.12), width=line_w, cap="round"))
+        # Left arm down
+        self.canvas.add(Line(points=px(cx, cy + 0.12) + px(cx - 0.12, cy - 0.02), width=line_w, cap="round"))
+        # Right arm: shoulder -> elbow (waves in horizontal plane — arc in y)
+        elbow_x = cx + 0.11
+        elbow_y = cy + 0.14 + 0.06 * wave
+        hand_x = cx + 0.20 + 0.04 * sin(ph * 2.2 + 0.8)
+        hand_y = cy + 0.18 + 0.10 * sin(ph * 2.2)
+        self.canvas.add(
+            Line(
+                points=px(cx, cy + 0.12) + px(elbow_x, elbow_y) + px(hand_x, hand_y),
+                width=line_w,
+                cap="round",
+            )
+        )
+        self.canvas.add(Line(points=px(cx, cy - 0.12) + px(cx - 0.10, cy - 0.38), width=line_w, cap="round"))
+        self.canvas.add(Line(points=px(cx, cy - 0.12) + px(cx + 0.10, cy - 0.38), width=line_w, cap="round"))

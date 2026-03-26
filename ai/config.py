@@ -3,9 +3,9 @@ Configuration management for Jansky.
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 import json
 
 
@@ -67,6 +67,12 @@ class Config:
     display_height: int = 480
     use_framebuffer: bool = False
 
+    # Face images under assets/face/ — optional subfolder (e.g. "cute") and/or per-state filenames
+    face_theme: str = ""
+    face_images: dict[str, Any] = field(default_factory=dict)
+    # When True, always show the built-in vector mascot (ignores PNG paths even if files exist).
+    face_use_vector: bool = False
+
     # Features
     enable_streaming_tts: bool = False
     enable_ui: bool = False
@@ -114,6 +120,8 @@ class Config:
                 for key, value in data.items():
                     if hasattr(config, key):
                         setattr(config, key, value)
+        if not isinstance(config.face_images, dict):
+            config.face_images = {}
 
         # Load from .env file if present
         env_path = os.path.join(config.project_root, ".env")

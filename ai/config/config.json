@@ -8,5 +8,14 @@
   "use_framebuffer": false,
   "enable_streaming_tts": false,
   "enable_ui": false,
-  "local_location": "Kingston, CA"
+  "local_location": "Kingston, CA",
+  "face_theme": "",
+  "face_use_vector": true,
+  "face_images": {
+    "waiting": "happy.png",
+    "listening": "thinking.png",
+    "thinking": "thinking.png",
+    "speaking": "happy_eye_glistening.png",
+    "follow_up": "happy.png"
+  }
 }

@@ -24,8 +24,94 @@ from kivy.graphics import Color, RoundedRectangle, Rectangle
 from kivy.metrics import dp
 import os
 
-from config import config_manager
+from kivy.app import App
+import importlib.util
+
+_ui_dir = os.path.dirname(os.path.abspath(__file__))
+_cfg_spec = importlib.util.spec_from_file_location(
+    "vidatron_ui_settings", os.path.join(_ui_dir, "config.py")
+)
+_vidatron_ui_settings = importlib.util.module_from_spec(_cfg_spec)
+_cfg_spec.loader.exec_module(_vidatron_ui_settings)
+config_manager = _vidatron_ui_settings.config_manager
+
+from face_customization import normalize_eye_choice, normalize_mouth_choice
 from widgets import Face, StickFigureIcon
+
+
+def app_main_nav_screen(sm) -> str:
+    """Voice assistant root uses ``voice``; legacy PreviewApp uses ``homescreen``."""
+    if sm.has_screen("voice"):
+        return "voice"
+    return "homescreen"
+
+
+def sync_voice_engine_face_from_config() -> None:
+    """Push saved eye/mouth choices to the running voice UI engine (immediate preview)."""
+    try:
+        app = App.get_running_app()
+        if not app or not getattr(app, "engine", None):
+            return
+        eng = app.engine
+        eng.selected_eyes = normalize_eye_choice(config_manager.get("face_customization.selected_eyes"))
+        eng.selected_mouth = normalize_mouth_choice(config_manager.get("face_customization.selected_mouth"))
+    except (AttributeError, TypeError):
+        pass
+
+
+# One swatch sets vivid accent (blobs) + soft screen background — see SetupColorsScreen.
+SETUP_COLOR_THEMES = (
+    ("Blue", (0.10, 0.90, 1.00, 1.0), [0.38, 0.55, 0.82, 1.0]),
+    ("Purple", (0.80, 0.35, 1.00, 1.0), [0.52, 0.40, 0.72, 1.0]),
+    ("Pink", (1.00, 0.41, 0.71, 1.0), [0.88, 0.55, 0.70, 1.0]),
+    ("Orange", (1.00, 0.45, 0.10, 1.0), [0.92, 0.65, 0.42, 1.0]),
+    ("Green", (0.15, 1.00, 0.55, 1.0), [0.42, 0.72, 0.55, 1.0]),
+)
+
+
+def _rgba_close(a, b, tol=0.06):
+    return all(abs(float(a[i]) - float(b[i])) <= tol for i in range(3))
+
+
+def sync_voice_theme_from_config() -> None:
+    """Apply default_colors from disk to the running voice screen (live preview while in setup)."""
+    try:
+        app = App.get_running_app()
+        if not app:
+            return
+        root = app.root
+        if not root or not getattr(root, "has_screen", None) or not root.has_screen("voice"):
+            return
+        voice_scr = root.get_screen("voice")
+        if not voice_scr.children:
+            return
+        vr = voice_scr.children[0]
+        bg = config_manager.get("default_colors.background", SETUP_COLOR_THEMES[0][2])
+        prim = config_manager.get("default_colors.primary", list(SETUP_COLOR_THEMES[0][1]))
+        if isinstance(bg, list) and len(bg) >= 3 and hasattr(vr, "bg_color"):
+            vr.bg_color = [
+                float(bg[0]),
+                float(bg[1]),
+                float(bg[2]),
+                float(bg[3] if len(bg) > 3 else 1.0),
+            ]
+        if isinstance(prim, list) and len(prim) >= 3 and hasattr(vr, "blob_color_a"):
+            pr = [float(prim[0]), float(prim[1]), float(prim[2])]
+            vr.blob_color_a = [
+                pr[0] * 0.55 + 0.2,
+                pr[1] * 0.55 + 0.2,
+                pr[2] * 0.55 + 0.2,
+                0.38,
+            ]
+            vr.blob_color_b = [
+                pr[0] * 0.35 + 0.08,
+                pr[1] * 0.35 + 0.08,
+                pr[2] * 0.35 + 0.15,
+                0.42,
+            ]
+        Window.clearcolor = (vr.bg_color[0], vr.bg_color[1], vr.bg_color[2], 1.0)
+    except (AttributeError, IndexError, TypeError, ValueError):
+        pass
 
 
 class WelcomeScreen(Screen):
@@ -174,7 +260,7 @@ class WelcomeScreen(Screen):
         """Revert to default settings (blue screen, round eyes, smile) and go to homescreen."""
         # Default: blue accent, Round eyes, Curved mouth (smile)
         config_manager.set("face_customization.selected_eyes", "Round")
-        config_manager.set("face_customization.selected_mouth", "Curved")
+        config_manager.set("face_customization.selected_mouth", "Neutral")
         config_manager.set("default_colors.primary", [0.10, 0.90, 1.00, 1.0])
         config_manager.set("font_settings.style", "Roboto")
         config_manager.set("font_settings.size", 30)
@@ -203,8 +289,14 @@ class SetupFaceScreen(Screen):
     def __init__(self, **kwargs):
         """Initialize the face customization setup screen."""
         super().__init__(**kwargs)
-        self.selected_eyes = None
-        self.selected_mouth = None
+        self.selected_eyes = normalize_eye_choice(
+            config_manager.get("face_customization.selected_eyes", "Round")
+        )
+        self.selected_mouth = normalize_mouth_choice(
+            config_manager.get("face_customization.selected_mouth", "Neutral")
+        )
+        self._eyes_btn = None
+        self._mouth_btn = None
         self.setup_ui()
     
     def setup_ui(self):
@@ -218,7 +310,7 @@ class SetupFaceScreen(Screen):
         
         # Title
         title = Label(
-            text="Welcome to Vidatron!\nStep 1/3: Face Customization",
+            text="Welcome to Vidatron!\nStep 1/2: Face Customization",
             font_size="36sp",
             bold=True,
             color=(1, 1, 1, 1),
@@ -231,7 +323,7 @@ class SetupFaceScreen(Screen):
         
         # Instructions
         instructions = Label(
-            text="Customize your robot's face (optional)",
+            text="Choose eye and mouth shapes",
             font_size="22sp",
             color=(0.8, 0.8, 1, 1),
             halign="center",
@@ -242,7 +334,7 @@ class SetupFaceScreen(Screen):
         
         # Eyes selection with better spacing
         eyes_label = Label(
-            text="Eyes (optional):",
+            text="Eyes:",
             font_size="24sp",
             color=(0.9, 0.9, 1, 1),
             halign="left",
@@ -253,24 +345,24 @@ class SetupFaceScreen(Screen):
         
         self.eyes_dropdown = DropDown()
         eyes_btn = Button(
-            text="Select Eyes",
+            text=f"Eyes: {self.selected_eyes}",
             size_hint=(0.35, 0.08),
             pos_hint={"x": 0.5, "y": 0.62},
             background_color=(0.3, 0.5, 0.8, 1.0),
             background_normal='',
             background_down=''
         )
-        # At least 3 options for eyes (including None)
-        for option in ["None", "Round", "Oval", "Narrow", "Wide", "Small"]:
+        for option in ["Round", "Narrow", "Wide", "Small"]:
             btn = Button(text=option, size_hint_y=None, height=dp(50))
             btn.bind(on_release=lambda b, opt=option: self.select_eyes(opt, eyes_btn))
             self.eyes_dropdown.add_widget(btn)
         eyes_btn.bind(on_release=self.eyes_dropdown.open)
         layout.add_widget(eyes_btn)
+        self._eyes_btn = eyes_btn
         
         # Mouth selection with better spacing
         mouth_label = Label(
-            text="Mouth (optional):",
+            text="Mouth:",
             font_size="24sp",
             color=(0.9, 0.9, 1, 1),
             halign="left",
@@ -281,20 +373,20 @@ class SetupFaceScreen(Screen):
         
         self.mouth_dropdown = DropDown()
         mouth_btn = Button(
-            text="Select Mouth",
+            text=f"Mouth: {self.selected_mouth}",
             size_hint=(0.35, 0.08),
             pos_hint={"x": 0.5, "y": 0.50},
             background_color=(0.3, 0.5, 0.8, 1.0),
             background_normal='',
             background_down=''
         )
-        # At least 3 options for mouth (including None)
-        for option in ["None", "Wide", "Small", "Expressive", "Neutral", "Curved", "Smile"]:
+        for option in ["Small", "Wide", "Neutral"]:
             btn = Button(text=option, size_hint_y=None, height=dp(50))
             btn.bind(on_release=lambda b, opt=option: self.select_mouth(opt, mouth_btn))
             self.mouth_dropdown.add_widget(btn)
         mouth_btn.bind(on_release=self.mouth_dropdown.open)
         layout.add_widget(mouth_btn)
+        self._mouth_btn = mouth_btn
         
         # Navigation buttons with better styling
         back_btn = Button(
@@ -305,7 +397,13 @@ class SetupFaceScreen(Screen):
             background_normal='',
             background_down=''
         )
-        back_btn.bind(on_release=lambda *_: setattr(self.manager, "current", "welcome"))
+        back_btn.bind(
+            on_release=lambda *_: setattr(
+                self.manager,
+                "current",
+                app_main_nav_screen(self.manager) if self.manager.has_screen("voice") else "welcome",
+            )
+        )
         layout.add_widget(back_btn)
         
         next_btn = Button(
@@ -322,169 +420,87 @@ class SetupFaceScreen(Screen):
         self.add_widget(layout)
     
     def select_eyes(self, option, btn):
-        """Handle eyes selection (nullable - can be None)."""
+        """Handle eyes selection."""
         self.eyes_dropdown.dismiss()
-        if option == "None":
-            self.selected_eyes = None
-            btn.text = "Eyes: None"
-        else:
-            self.selected_eyes = option
-            btn.text = f"Eyes: {option}"
-        # Save immediately when selected
+        self.selected_eyes = normalize_eye_choice(option)
+        btn.text = f"Eyes: {self.selected_eyes}"
         config_manager.set("face_customization.selected_eyes", self.selected_eyes)
+        sync_voice_engine_face_from_config()
     
     def select_mouth(self, option, btn):
-        """Handle mouth selection (nullable - can be None)."""
+        """Handle mouth selection."""
         self.mouth_dropdown.dismiss()
-        if option == "None":
-            self.selected_mouth = None
-            btn.text = "Mouth: None"
-        else:
-            self.selected_mouth = option
-            btn.text = f"Mouth: {option}"
-        # Save immediately when selected
+        self.selected_mouth = normalize_mouth_choice(option)
+        btn.text = f"Mouth: {self.selected_mouth}"
         config_manager.set("face_customization.selected_mouth", self.selected_mouth)
+        sync_voice_engine_face_from_config()
+    
+    def on_pre_enter(self, *args):
+        """Show current saved choices on the buttons and sync the live mascot."""
+        self.selected_eyes = normalize_eye_choice(config_manager.get("face_customization.selected_eyes"))
+        self.selected_mouth = normalize_mouth_choice(config_manager.get("face_customization.selected_mouth"))
+        if self._eyes_btn:
+            self._eyes_btn.text = f"Eyes: {self.selected_eyes}"
+        if self._mouth_btn:
+            self._mouth_btn.text = f"Mouth: {self.selected_mouth}"
+        sync_voice_engine_face_from_config()
     
     def next_page(self, instance):
-        """Save face customization and navigate to font selection."""
-        # Ensure values are saved (they're already saved on selection, but double-check)
-        config_manager.set("face_customization.selected_eyes", self.selected_eyes)
-        config_manager.set("face_customization.selected_mouth", self.selected_mouth)
-        self.manager.current = "setup_font"
-
-
-class SetupFontScreen(Screen):
-    """
-    First-time setup - Page 2: Font Selection
-    Allows user to choose font style and size.
-    """
-    
-    def __init__(self, **kwargs):
-        """Initialize the font selection setup screen."""
-        super().__init__(**kwargs)
-        self.selected_style = "Roboto"
-        self.setup_ui()
-    
-    def setup_ui(self):
-        """Build the UI for font selection."""
-        layout = FloatLayout()
-        
-        # Title
-        title = Label(
-            text="Step 2/3: Font Selection",
-            font_size="32sp",
-            bold=True,
-            color=(1, 1, 1, 1),
-            halign="center",
-            valign="top",
-            size_hint=(1, 0.15),
-            pos_hint={"x": 0, "y": 0.85}
+        """Save face customization and go to colours."""
+        config_manager.set(
+            "face_customization.selected_eyes", normalize_eye_choice(self.selected_eyes)
         )
-        layout.add_widget(title)
-        
-        # Font style
-        style_label = Label(
-            text="Font Style:",
-            font_size="22sp",
-            color=(0.9, 0.9, 1, 1),
-            halign="left",
-            size_hint=(0.3, 0.08),
-            pos_hint={"x": 0.1, "y": 0.60}
+        config_manager.set(
+            "face_customization.selected_mouth", normalize_mouth_choice(self.selected_mouth)
         )
-        layout.add_widget(style_label)
-        
-        self.style_dropdown = DropDown()
-        style_btn = Button(
-            text="Roboto",
-            size_hint=(0.3, 0.08),
-            pos_hint={"x": 0.35, "y": 0.60}
-        )
-        # Only use fonts that Kivy reliably supports
-        for option in ["Roboto", "DejaVuSans"]:
-            btn = Button(text=option, size_hint_y=None, height=50)
-            btn.bind(on_release=lambda b, opt=option: self.select_style(opt, style_btn))
-            self.style_dropdown.add_widget(btn)
-        style_btn.bind(on_release=self.style_dropdown.open)
-        layout.add_widget(style_btn)
-        
-        # Font size
-        size_label = Label(
-            text="Font Size:",
-            font_size="22sp",
-            color=(0.9, 0.9, 1, 1),
-            halign="left",
-            size_hint=(0.3, 0.08),
-            pos_hint={"x": 0.1, "y": 0.48}
-        )
-        layout.add_widget(size_label)
-        
-        self.size_input = TextInput(
-            text="30",
-            multiline=False,
-            size_hint=(0.2, 0.08),
-            pos_hint={"x": 0.35, "y": 0.48}
-        )
-        layout.add_widget(self.size_input)
-        
-        # Navigation buttons
-        back_btn = Button(
-            text="← Back",
-            size_hint=(0.2, 0.10),
-            pos_hint={"x": 0.1, "y": 0.15},
-            background_color=(0.5, 0.5, 0.5, 1.0)
-        )
-        back_btn.bind(on_release=lambda *_: setattr(self.manager, "current", "setup_face"))
-        layout.add_widget(back_btn)
-        
-        next_btn = Button(
-            text="Next →",
-            size_hint=(0.25, 0.10),
-            pos_hint={"x": 0.7, "y": 0.15},
-            background_color=(0.2, 0.6, 0.8, 1.0)
-        )
-        next_btn.bind(on_release=self.next_page)
-        layout.add_widget(next_btn)
-        
-        self.add_widget(layout)
-    
-    def select_style(self, option, btn):
-        """Handle font style selection."""
-        self.style_dropdown.dismiss()
-        self.selected_style = option
-        btn.text = option
-        # Save immediately when selected
-        config_manager.set("font_settings.style", self.selected_style)
-    
-    def next_page(self, instance):
-        """Save font settings and navigate to color selection."""
-        # Ensure style is saved (already saved on selection, but double-check)
-        config_manager.set("font_settings.style", self.selected_style)
-        try:
-            font_size = int(self.size_input.text)
-            config_manager.set("font_settings.size", font_size)
-        except ValueError:
-            config_manager.set("font_settings.size", 30)
+        sync_voice_engine_face_from_config()
         self.manager.current = "setup_colors"
 
 
 class SetupColorsScreen(Screen):
     """
-    First-time setup - Page 3: Default Colors Selection
-    Allows user to choose default accent color.
+    First-time setup - Page 2: accent colour and matching main screen background.
     """
-    
+
+    def _sync_theme_from_saved_config(self):
+        """Set selected_color / _current_background from JSON (or default theme)."""
+        self.selected_color = tuple(SETUP_COLOR_THEMES[0][1])
+        self._current_background = list(SETUP_COLOR_THEMES[0][2])
+        loaded_bg = config_manager.get("default_colors.background")
+        loaded_prim = config_manager.get("default_colors.primary")
+        if isinstance(loaded_bg, list) and len(loaded_bg) >= 3:
+            lb = [float(loaded_bg[i]) for i in range(min(4, len(loaded_bg)))]
+            if len(lb) == 3:
+                lb.append(1.0)
+            for _name, accent, bg in SETUP_COLOR_THEMES:
+                if _rgba_close(lb, bg):
+                    self.selected_color = tuple(accent)
+                    self._current_background = lb
+                    return
+            self._current_background = lb
+            if isinstance(loaded_prim, list) and len(loaded_prim) >= 3:
+                self.selected_color = tuple(
+                    float(loaded_prim[i]) for i in range(min(4, len(loaded_prim)))
+                )
+            return
+        if isinstance(loaded_prim, list) and len(loaded_prim) >= 3:
+            lp = [float(loaded_prim[i]) for i in range(min(4, len(loaded_prim)))]
+            for _name, accent, bg in SETUP_COLOR_THEMES:
+                if _rgba_close(lp, list(accent)):
+                    self.selected_color = tuple(accent)
+                    self._current_background = list(bg)
+                    return
+
     def __init__(self, **kwargs):
         """Initialize the color selection setup screen."""
         super().__init__(**kwargs)
-        color_presets = [
-            ("Blue", (0.10, 0.90, 1.00, 1.0)),
-            ("Purple", (0.80, 0.35, 1.00, 1.0)),
-            ("Pink", (1.00, 0.41, 0.71, 1.0)),
-            ("Orange", (1.00, 0.45, 0.10, 1.0)),
-            ("Green", (0.15, 1.00, 0.55, 1.0)),
-        ]
-        self.selected_color = color_presets[0][1]
+        self._sync_theme_from_saved_config()
         self.setup_ui()
+
+    def on_pre_enter(self, *args):
+        """Reload saved theme when opening this screen (e.g. from swipe menu)."""
+        self._sync_theme_from_saved_config()
+        sync_voice_theme_from_config()
     
     def setup_ui(self):
         """Build the UI for color selection."""
@@ -492,7 +508,7 @@ class SetupColorsScreen(Screen):
         
         # Title
         title = Label(
-            text="Step 3/3: Default Colors",
+            text="Step 2/2: Colours",
             font_size="32sp",
             bold=True,
             color=(1, 1, 1, 1),
@@ -505,50 +521,58 @@ class SetupColorsScreen(Screen):
         
         # Instructions
         instructions = Label(
-            text="Choose your default accent color",
+            text="Accent colour & background",
             font_size="20sp",
             color=(0.8, 0.8, 1, 1),
             halign="center",
-            size_hint=(1, 0.08),
-            pos_hint={"x": 0, "y": 0.75}
+            size_hint=(1, 0.06),
+            pos_hint={"x": 0, "y": 0.78}
         )
         layout.add_widget(instructions)
-        
-        # Color presets (5: Blue, Purple, Pink, Orange, Green) - two rows to fit 800px
-        color_presets = [
-            ("Blue", (0.10, 0.90, 1.00, 1.0)),
-            ("Purple", (0.80, 0.35, 1.00, 1.0)),
-            ("Pink", (1.00, 0.41, 0.71, 1.0)),
-            ("Orange", (1.00, 0.45, 0.10, 1.0)),
-            ("Green", (0.15, 1.00, 0.55, 1.0)),
-        ]
-        for i, (name, color) in enumerate(color_presets):
+
+        # One row per theme: sets main screen background + accent (blobs).
+        for i, (name, color, _bg) in enumerate(SETUP_COLOR_THEMES):
             row, col = i // 3, i % 3
             btn = Button(
                 text=name,
-                size_hint=(0.28, 0.12),
-                pos_hint={"x": 0.08 + col * 0.32, "y": 0.58 - row * 0.14},
+                size_hint=(0.28, 0.11),
+                pos_hint={"x": 0.08 + col * 0.32, "y": 0.62 - row * 0.13},
                 background_color=(*color[:3], 0.8),
                 font_size="18sp"
             )
-            btn.bind(on_release=lambda b, c=color: self.select_color(c))
+            btn.bind(
+                on_release=lambda b, acc=color, bg=list(_bg): self.apply_color_theme(acc, bg)
+            )
             layout.add_widget(btn)
-        
+
+        rem_btn = Button(
+            text="Healthy reminders",
+            size_hint=(0.45, 0.07),
+            pos_hint={"center_x": 0.5, "y": 0.22},
+            background_color=(0.55, 0.35, 0.72, 1.0),
+            background_normal="",
+            background_down="",
+            color=(1, 1, 1, 1),
+            font_size="17sp",
+        )
+        rem_btn.bind(on_release=lambda *_: setattr(self.manager, "current", "reminders"))
+        layout.add_widget(rem_btn)
+
         # Navigation buttons
         back_btn = Button(
             text="← Back",
-            size_hint=(0.2, 0.10),
-            pos_hint={"x": 0.1, "y": 0.15},
+            size_hint=(0.2, 0.09),
+            pos_hint={"x": 0.1, "y": 0.075},
             background_color=(0.5, 0.5, 0.5, 1.0)
         )
-        back_btn.bind(on_release=lambda *_: setattr(self.manager, "current", "setup_font"))
+        back_btn.bind(on_release=lambda *_: setattr(self.manager, "current", "setup_face"))
         layout.add_widget(back_btn)
         
         # Complete Setup Button
         complete_btn = Button(
-            text="Complete Setup",
-            size_hint=(0.35, 0.10),
-            pos_hint={"x": 0.55, "y": 0.15},
+            text="Save & return",
+            size_hint=(0.35, 0.09),
+            pos_hint={"x": 0.55, "y": 0.075},
             background_color=(0.2, 0.8, 0.4, 1.0)
         )
         complete_btn.bind(on_release=self.complete_setup)
@@ -556,18 +580,21 @@ class SetupColorsScreen(Screen):
         
         self.add_widget(layout)
     
-    def select_color(self, color):
-        """Handle default color selection."""
-        self.selected_color = color
-        # Save immediately when selected
-        config_manager.set("default_colors.primary", list(self.selected_color))
-    
+    def apply_color_theme(self, accent, background):
+        """Persist accent + matching background and update the voice screen immediately."""
+        self.selected_color = accent
+        self._current_background = list(background)
+        config_manager.set("default_colors.primary", list(accent))
+        config_manager.set("default_colors.background", self._current_background)
+        sync_voice_theme_from_config()
+
     def complete_setup(self, instance):
         """Save color settings, mark setup complete, and navigate to homescreen."""
-        # Ensure color is saved (already saved on selection, but double-check)
         config_manager.set("default_colors.primary", list(self.selected_color))
+        config_manager.set("default_colors.background", list(self._current_background))
+        sync_voice_theme_from_config()
         config_manager.set("first_time_setup_complete", True)
-        self.manager.current = "homescreen"
+        self.manager.current = app_main_nav_screen(self.manager)
 
 
 class Homescreen(Screen):
@@ -616,12 +643,8 @@ class Homescreen(Screen):
         
         # Face area (top 72%) - shown by default
         self.face = Face(size_hint=(1, 0.72), pos_hint={"x": 0, "y": 0.28})
-        # Apply saved face customization (ensure None is properly handled)
-        eyes = config_manager.get("face_customization.selected_eyes")
-        mouth = config_manager.get("face_customization.selected_mouth")
-        # Convert string "None" to actual None if needed
-        eyes = None if eyes == "None" or eyes is None else eyes
-        mouth = None if mouth == "None" or mouth is None else mouth
+        eyes = normalize_eye_choice(config_manager.get("face_customization.selected_eyes"))
+        mouth = normalize_mouth_choice(config_manager.get("face_customization.selected_mouth"))
         self.face.set_customization(eyes, mouth)
         
         # Apply saved default color to face
@@ -739,12 +762,8 @@ class Homescreen(Screen):
     
     def on_pre_enter(self, *args):
         """Refresh reminders and ALL customizations when screen becomes visible."""
-        # Update face customization from config (reload to ensure latest values)
-        eyes = config_manager.get("face_customization.selected_eyes")
-        mouth = config_manager.get("face_customization.selected_mouth")
-        # Convert string "None" to actual None, ensure proper None handling
-        eyes = None if eyes == "None" or eyes is None else eyes
-        mouth = None if mouth == "None" or mouth is None else mouth
+        eyes = normalize_eye_choice(config_manager.get("face_customization.selected_eyes"))
+        mouth = normalize_mouth_choice(config_manager.get("face_customization.selected_mouth"))
         self.face.set_customization(eyes, mouth)
         
         # Update font settings - CRITICAL: Must update font_size property
@@ -772,10 +791,8 @@ class Homescreen(Screen):
         """Show the default homescreen: user's face, default color, and reminder count (no reminder card).
         Per-reminder face customizations are never applied here; they only apply when a reminder is triggered (apply_card).
         """
-        eyes = config_manager.get("face_customization.selected_eyes")
-        mouth = config_manager.get("face_customization.selected_mouth")
-        eyes = None if eyes == "None" or eyes is None else eyes
-        mouth = None if mouth == "None" or mouth is None else mouth
+        eyes = normalize_eye_choice(config_manager.get("face_customization.selected_eyes"))
+        mouth = normalize_mouth_choice(config_manager.get("face_customization.selected_mouth"))
         self.face.set_customization(eyes, mouth)
         default_color = config_manager.get("default_colors.primary", [0.10, 0.90, 1.00, 1.0])
         if isinstance(default_color, list):
@@ -852,18 +869,15 @@ class Homescreen(Screen):
             # Apply face expression customization to face widget
             expr_eyes = face_expression.get("eyes")
             expr_mouth = face_expression.get("mouth")
-            # Ensure None values are properly passed (not string "None")
-            expr_eyes = None if expr_eyes == "None" or expr_eyes is None else expr_eyes
-            expr_mouth = None if expr_mouth == "None" or expr_mouth is None else expr_mouth
+            if expr_eyes is not None:
+                expr_eyes = normalize_eye_choice(expr_eyes)
+            if expr_mouth is not None:
+                expr_mouth = normalize_mouth_choice(expr_mouth)
             self.face.set_customization(expr_eyes, expr_mouth)
         else:
             mood = reminder.get("mood", "happy")
-            # Use global customization - always refresh from config
-            eyes = config_manager.get("face_customization.selected_eyes")
-            mouth = config_manager.get("face_customization.selected_mouth")
-            # Ensure None values are properly passed (not string "None")
-            eyes = None if eyes == "None" or eyes is None else eyes
-            mouth = None if mouth == "None" or mouth is None else mouth
+            eyes = normalize_eye_choice(config_manager.get("face_customization.selected_eyes"))
+            mouth = normalize_mouth_choice(config_manager.get("face_customization.selected_mouth"))
             self.face.set_customization(eyes, mouth)
         
         # Display reminder icon (stick figure modeling the action) - replaces face when shown
@@ -1211,26 +1225,77 @@ class SettingsScreen(Screen):
     
     def return_home(self, instance):
         """Navigate back to homescreen."""
-        self.manager.current = "homescreen"
+        self.manager.current = app_main_nav_screen(self.manager)
+
+
+# Built-in healthy habits for add/edit reminder UI (keys stable for JSON action + stick figure).
+HEALTHY_HABIT_PRESETS = (
+    {
+        "key": "drink_water",
+        "label": "Drink water",
+        "text": "Drink water",
+        "description": "Stay hydrated!",
+        "action": "drink",
+        "icon_path": "assets/icons/drink_water.png",
+        "accent": [0.10, 0.90, 1.00, 1.0],
+        "mood": "happy",
+    },
+    {
+        "key": "stretch",
+        "label": "Get up and stretch",
+        "text": "Get up and stretch",
+        "description": "Take a break and move around",
+        "action": "stretch",
+        "icon_path": "assets/icons/stretch.png",
+        "accent": [0.15, 1.00, 0.55, 1.0],
+        "mood": "calm",
+    },
+)
+
+_TRIGGER_LABELS = {
+    "Every X Minutes": "Every X minutes",
+    "Specific Time": "At a specific time",
+}
+
+
+def _habit_preset_by_key(key: str):
+    for p in HEALTHY_HABIT_PRESETS:
+        if p["key"] == key:
+            return p
+    return HEALTHY_HABIT_PRESETS[0]
+
+
+def _habit_preset_for_reminder(reminder: dict):
+    """Pick the closest habit preset for an existing saved reminder."""
+    text = (reminder.get("text") or "").strip().lower()
+    ip = (reminder.get("icon_path") or "").lower()
+    act = (reminder.get("action") or "").lower()
+    for p in HEALTHY_HABIT_PRESETS:
+        if (p["text"] or "").strip().lower() == text:
+            return p
+        if act and p.get("action") == act:
+            return p
+        pip = (p.get("icon_path") or "").lower()
+        if ip and pip and ip.endswith(pip.split("/")[-1].lower()):
+            return p
+    return _habit_preset_by_key("drink_water")
 
 
 class ReminderEditScreen(Screen):
     """
-    Screen for editing/creating reminders with all fields:
-    - Text (nullable)
-    - Icon (nullable)
-    - Face expression (nullable, but requires eyes/mouth to be defined)
-    - Trigger Time
-    - Repeat Settings
-    - is_active flag
+    Create or edit a reminder: pick a built-in healthy habit, then either
+    an interval (every X minutes) or a specific clock time — same JSON schema
+    as :func:`voice_reminder_tick` in the voice app.
     """
-    
+
     def __init__(self, reminder_index=None, **kwargs):
         """Initialize the reminder edit screen."""
         super().__init__(**kwargs)
         self.reminder_index = reminder_index
+        self._habit_key = HEALTHY_HABIT_PRESETS[0]["key"]
+        self._trigger_type_stored = "Every X Minutes"
         self.setup_ui()
-    
+
     def setup_ui(self):
         """Build the reminder edit UI with proper spacing and ScrollView."""
         # Main container
@@ -1271,133 +1336,65 @@ class ReminderEditScreen(Screen):
         )
         form_layout.bind(minimum_height=form_layout.setter('height'))
         
-        # Text input section
-        text_container = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(10))
-        text_label = Label(
-            text="Text:",
+        # Healthy habit (preset list — text, stick figure, colors come from preset)
+        habit_container = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(10))
+        habit_label = Label(
+            text="Healthy habit:",
             font_size="20sp",
             color=(0.9, 0.9, 1, 1),
             halign="left",
-            size_hint_x=0.25,
-            text_size=(None, None)
+            size_hint_x=0.32,
+            text_size=(None, None),
         )
-        self.text_input = TextInput(
-            text="",
-            multiline=False,
-            size_hint_x=0.75,
-            font_size="18sp",
-            background_color=(0.15, 0.15, 0.20, 1.0),
-            foreground_color=(1, 1, 1, 1),
-            padding=dp(10)
-        )
-        text_container.add_widget(text_label)
-        text_container.add_widget(self.text_input)
-        form_layout.add_widget(text_container)
-        
-        # Icon selection section (image file path)
-        icon_container = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(80), spacing=dp(5))
-        icon_label = Label(
-            text="Icon (image file):",
-            font_size="20sp",
-            color=(0.9, 0.9, 1, 1),
-            halign="left",
-            size_hint_y=0.4,
-            text_size=(None, None)
-        )
-        icon_row = BoxLayout(orientation="horizontal", size_hint_y=0.6, spacing=dp(8))
-        
-        # Icon dropdown with predefined options (using relative paths)
-        self.icon_dropdown = DropDown()
-        icon_options = [
-            ("None", None),
-            ("Drink Water", "assets/icons/drink_water.png"),
-            ("Stretch", "assets/icons/stretch.png"),
-            ("Custom Path", "CUSTOM")
-        ]
-        self.icon_btn = Button(
-            text="None",
-            size_hint_x=0.35,
+        self.habit_dropdown = DropDown()
+        self.habit_btn = Button(
+            text=HEALTHY_HABIT_PRESETS[0]["label"],
+            size_hint_x=0.63,
             font_size="16sp",
             background_color=(0.3, 0.5, 0.8, 1.0),
-            background_normal='',
-            background_down='',
-            color=(1, 1, 1, 1)
+            background_normal="",
+            background_down="",
+            color=(1, 1, 1, 1),
         )
-        for label, path in icon_options:
-            btn = Button(text=label, size_hint_y=None, height=dp(40), font_size="16sp")
-            btn.bind(on_release=lambda b, p=path, lbl=label: self._select_icon(p, lbl))
-            self.icon_dropdown.add_widget(btn)
-        self.icon_btn.bind(on_release=self.icon_dropdown.open)
-        
-        # Custom path input (shown when "Custom Path" selected)
-        self.icon_path_input = TextInput(
-            text="",
-            multiline=False,
-            size_hint_x=0.6,
-            font_size="14sp",
-            background_color=(0.15, 0.15, 0.20, 1.0),
-            foreground_color=(1, 1, 1, 1),
-            padding=dp(8),
-            hint_text="assets/icons/icon.png",
-            disabled=True
-        )
-        icon_row.add_widget(self.icon_btn)
-        icon_row.add_widget(self.icon_path_input)
-        icon_container.add_widget(icon_label)
-        icon_container.add_widget(icon_row)
-        form_layout.add_widget(icon_container)
-        
-        # Description input section
-        desc_container = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(100), spacing=dp(5))
-        desc_label = Label(
-            text="Description:",
-            font_size="20sp",
-            color=(0.9, 0.9, 1, 1),
-            halign="left",
-            size_hint_y=0.3,
-            text_size=(None, None)
-        )
-        self.description_input = TextInput(
-            text="",
-            multiline=True,
-            size_hint_y=0.7,
-            font_size="16sp",
-            background_color=(0.15, 0.15, 0.20, 1.0),
-            foreground_color=(1, 1, 1, 1),
-            padding=dp(10)
-        )
-        desc_container.add_widget(desc_label)
-        desc_container.add_widget(self.description_input)
-        form_layout.add_widget(desc_container)
-        
-        # Trigger Type section (Time or Interval)
+        for preset in HEALTHY_HABIT_PRESETS:
+            btn = Button(text=preset["label"], size_hint_y=None, height=dp(44), font_size="16sp")
+            btn.bind(on_release=lambda b, k=preset["key"]: self.select_habit(k))
+            self.habit_dropdown.add_widget(btn)
+        self.habit_btn.bind(on_release=self.habit_dropdown.open)
+        habit_container.add_widget(habit_label)
+        habit_container.add_widget(self.habit_btn)
+        form_layout.add_widget(habit_container)
+
+        # Schedule: interval vs clock time (stored values unchanged for voice_reminder_tick / JSON)
         trigger_type_container = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(10))
         trigger_type_label = Label(
-            text="Trigger Type:",
+            text="When to remind:",
             font_size="20sp",
             color=(0.9, 0.9, 1, 1),
             halign="left",
-            size_hint_x=0.3,
-            text_size=(None, None)
+            size_hint_x=0.32,
+            text_size=(None, None),
         )
         self.trigger_type_dropdown = DropDown()
         self.trigger_type_btn = Button(
-            text="Specific Time",
-            size_hint_x=0.35,
+            text=_TRIGGER_LABELS["Every X Minutes"],
+            size_hint_x=0.63,
             font_size="16sp",
             background_color=(0.3, 0.5, 0.8, 1.0),
-            background_normal='',
-            background_down='',
-            color=(1, 1, 1, 1)
+            background_normal="",
+            background_down="",
+            color=(1, 1, 1, 1),
         )
-        for option in ["Specific Time", "Every X Minutes"]:
-            btn = Button(text=option, size_hint_y=None, height=dp(45), font_size="16sp")
-            btn.bind(on_release=lambda b, opt=option: self.select_trigger_type(opt))
+        for stored, disp in (
+            ("Every X Minutes", _TRIGGER_LABELS["Every X Minutes"]),
+            ("Specific Time", _TRIGGER_LABELS["Specific Time"]),
+        ):
+            btn = Button(text=disp, size_hint_y=None, height=dp(45), font_size="16sp")
+            btn.bind(on_release=lambda b, s=stored: self.select_trigger_type(s))
             self.trigger_type_dropdown.add_widget(btn)
         self.trigger_type_btn.bind(on_release=self.trigger_type_dropdown.open)
         trigger_type_container.add_widget(trigger_type_label)
         trigger_type_container.add_widget(self.trigger_type_btn)
-        trigger_type_container.add_widget(Widget())  # Spacer
         form_layout.add_widget(trigger_type_container)
         
         # Trigger Time section (shown when "Specific Time" is selected)
@@ -1417,7 +1414,8 @@ class ReminderEditScreen(Screen):
             font_size="18sp",
             background_color=(0.15, 0.15, 0.20, 1.0),
             foreground_color=(1, 1, 1, 1),
-            padding=dp(10)
+            padding=dp(10),
+            disabled=True,
         )
         # AM/PM selector
         self.am_pm_dropdown = DropDown()
@@ -1428,7 +1426,8 @@ class ReminderEditScreen(Screen):
             background_color=(0.3, 0.5, 0.8, 1.0),
             background_normal='',
             background_down='',
-            color=(1, 1, 1, 1)
+            color=(1, 1, 1, 1),
+            disabled=True,
         )
         for option in ["AM", "PM"]:
             btn = Button(text=option, size_hint_y=None, height=dp(45), font_size="16sp")
@@ -1452,29 +1451,29 @@ class ReminderEditScreen(Screen):
             text_size=(None, None)
         )
         self.interval_input = TextInput(
-            text="5",
+            text="30",
             multiline=False,
             size_hint_x=0.3,
             font_size="18sp",
             background_color=(0.15, 0.15, 0.20, 1.0),
             foreground_color=(1, 1, 1, 1),
             padding=dp(10),
-            disabled=True  # Disabled by default (only enabled for interval type)
+            disabled=False,
         )
         interval_container.add_widget(interval_label)
         interval_container.add_widget(self.interval_input)
         interval_container.add_widget(Widget())  # Spacer
         form_layout.add_widget(interval_container)
         
-        # Repeat Settings section
-        repeat_container = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(10))
+        # Repeat (only used for "At a specific time" in the voice assistant)
+        self.repeat_container = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(10))
         repeat_label = Label(
-            text="Repeat:",
-            font_size="20sp",
+            text="Repeat (clock time):",
+            font_size="18sp",
             color=(0.9, 0.9, 1, 1),
             halign="left",
-            size_hint_x=0.25,
-            text_size=(None, None)
+            size_hint_x=0.32,
+            text_size=(None, None),
         )
         self.repeat_dropdown = DropDown()
         self.repeat_btn = Button(
@@ -1491,143 +1490,20 @@ class ReminderEditScreen(Screen):
             btn.bind(on_release=lambda b, opt=option: self.select_repeat(opt))
             self.repeat_dropdown.add_widget(btn)
         self.repeat_btn.bind(on_release=self.repeat_dropdown.open)
-        repeat_container.add_widget(repeat_label)
-        repeat_container.add_widget(self.repeat_btn)
-        repeat_container.add_widget(Widget())  # Spacer
-        form_layout.add_widget(repeat_container)
-        
-        # Face Expression toggle section
-        face_expr_container = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(10))
-        face_label = Label(
-            text="Face Expression:",
-            font_size="20sp",
-            color=(0.9, 0.9, 1, 1),
-            halign="left",
-            size_hint_x=0.4,
-            text_size=(None, None)
-        )
-        self.use_face_expr = ToggleButton(
-            text="Use Face Expression",
-            size_hint_x=0.5,
-            font_size="16sp",
-            background_color=(0.5, 0.3, 0.7, 1.0),
-            background_normal='',
-            background_down='',
-            color=(1, 1, 1, 1)
-        )
-        self.use_face_expr.bind(state=self.on_face_expr_toggle)
-        face_expr_container.add_widget(face_label)
-        face_expr_container.add_widget(self.use_face_expr)
-        face_expr_container.add_widget(Widget())  # Spacer
-        form_layout.add_widget(face_expr_container)
-        
-        # Face expression options (only shown when toggle is on)
-        fe_options_container = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(180), spacing=dp(10))
-        
-        # FE Eyes
-        fe_eyes_row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(10))
-        fe_eyes_label = Label(
-            text="FE Eyes:",
-            font_size="18sp",
-            color=(0.8, 0.8, 1, 1),
-            halign="left",
-            size_hint_x=0.3,
-            text_size=(None, None)
-        )
-        self.fe_eyes_dropdown = DropDown()
-        self.fe_eyes_btn = Button(
-            text="None",
-            size_hint_x=0.4,
-            font_size="16sp",
-            disabled=True,
-            background_color=(0.4, 0.4, 0.5, 0.5),
-            background_normal='',
-            background_down='',
-            color=(0.7, 0.7, 0.7, 1.0)
-        )
-        for option in ["None", "Round", "Oval", "Narrow", "Wide", "Small"]:
-            btn = Button(text=option, size_hint_y=None, height=dp(40), font_size="16sp")
-            btn.bind(on_release=lambda b, opt=option: self.select_fe_eyes(opt))
-            self.fe_eyes_dropdown.add_widget(btn)
-        self.fe_eyes_btn.bind(on_release=self.fe_eyes_dropdown.open)
-        fe_eyes_row.add_widget(fe_eyes_label)
-        fe_eyes_row.add_widget(self.fe_eyes_btn)
-        fe_eyes_row.add_widget(Widget())  # Spacer
-        fe_options_container.add_widget(fe_eyes_row)
-        
-        # FE Mouth
-        fe_mouth_row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(10))
-        fe_mouth_label = Label(
-            text="FE Mouth:",
-            font_size="18sp",
-            color=(0.8, 0.8, 1, 1),
-            halign="left",
-            size_hint_x=0.3,
-            text_size=(None, None)
-        )
-        self.fe_mouth_dropdown = DropDown()
-        self.fe_mouth_btn = Button(
-            text="None",
-            size_hint_x=0.4,
-            font_size="16sp",
-            disabled=True,
-            background_color=(0.4, 0.4, 0.5, 0.5),
-            background_normal='',
-            background_down='',
-            color=(0.7, 0.7, 0.7, 1.0)
-        )
-        for option in ["None", "Wide", "Small", "Expressive", "Neutral", "Curved", "Smile"]:
-            btn = Button(text=option, size_hint_y=None, height=dp(40), font_size="16sp")
-            btn.bind(on_release=lambda b, opt=option: self.select_fe_mouth(opt))
-            self.fe_mouth_dropdown.add_widget(btn)
-        self.fe_mouth_btn.bind(on_release=self.fe_mouth_dropdown.open)
-        fe_mouth_row.add_widget(fe_mouth_label)
-        fe_mouth_row.add_widget(self.fe_mouth_btn)
-        fe_mouth_row.add_widget(Widget())  # Spacer
-        fe_options_container.add_widget(fe_mouth_row)
-        
-        # Mood
-        mood_row = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(10))
-        mood_label = Label(
-            text="Mood:",
-            font_size="18sp",
-            color=(0.8, 0.8, 1, 1),
-            halign="left",
-            size_hint_x=0.3,
-            text_size=(None, None)
-        )
-        self.mood_dropdown = DropDown()
-        self.mood_btn = Button(
-            text="happy",
-            size_hint_x=0.4,
-            font_size="16sp",
-            disabled=True,
-            background_color=(0.4, 0.4, 0.5, 0.5),
-            background_normal='',
-            background_down='',
-            color=(0.7, 0.7, 0.7, 1.0)
-        )
-        for option in ["happy", "calm", "wink", "focused"]:
-            btn = Button(text=option, size_hint_y=None, height=dp(40), font_size="16sp")
-            btn.bind(on_release=lambda b, opt=option: self.select_mood(opt))
-            self.mood_dropdown.add_widget(btn)
-        self.mood_btn.bind(on_release=self.mood_dropdown.open)
-        mood_row.add_widget(mood_label)
-        mood_row.add_widget(self.mood_btn)
-        mood_row.add_widget(Widget())  # Spacer
-        fe_options_container.add_widget(mood_row)
-        
-        form_layout.add_widget(fe_options_container)
-        
+        self.repeat_container.add_widget(repeat_label)
+        self.repeat_container.add_widget(self.repeat_btn)
+        self.repeat_container.add_widget(Widget())
+        form_layout.add_widget(self.repeat_container)
+
         # Active toggle section (must be ON for reminder to trigger at set time)
         active_container = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(50), spacing=dp(10))
         active_label = Label(
-            text="Active (ON = shows at set time):",
+            text="Reminder active:",
             font_size="20sp",
             color=(0.9, 0.9, 1, 1),
             halign="left",
             size_hint_x=0.45,
-            text_size=(None, None)
+            text_size=(None, None),
         )
         self.is_active_toggle = ToggleButton(
             text="Active",
@@ -1711,56 +1587,29 @@ class ReminderEditScreen(Screen):
         main_layout.add_widget(button_container)
         
         self.add_widget(main_layout)
-    
-    def on_face_expr_toggle(self, instance, value):
-        """Enable/disable face expression controls based on toggle state."""
-        enabled = value == "down"
-        self.fe_eyes_btn.disabled = not enabled
-        self.fe_mouth_btn.disabled = not enabled
-        self.mood_btn.disabled = not enabled
-        
-        # Update button appearance
-        if enabled:
-            self.fe_eyes_btn.background_color = (0.4, 0.5, 0.7, 1.0)
-            self.fe_eyes_btn.color = (1, 1, 1, 1)
-            self.fe_mouth_btn.background_color = (0.4, 0.5, 0.7, 1.0)
-            self.fe_mouth_btn.color = (1, 1, 1, 1)
-            self.mood_btn.background_color = (0.4, 0.5, 0.7, 1.0)
-            self.mood_btn.color = (1, 1, 1, 1)
-        else:
-            self.fe_eyes_btn.background_color = (0.4, 0.4, 0.5, 0.5)
-            self.fe_eyes_btn.color = (0.7, 0.7, 0.7, 1.0)
-            self.fe_mouth_btn.background_color = (0.4, 0.4, 0.5, 0.5)
-            self.fe_mouth_btn.color = (0.7, 0.7, 0.7, 1.0)
-            self.mood_btn.background_color = (0.4, 0.4, 0.5, 0.5)
-            self.mood_btn.color = (0.7, 0.7, 0.7, 1.0)
-    
+        self.select_trigger_type("Every X Minutes")
+
+    def select_habit(self, key):
+        """User picked a built-in healthy habit preset."""
+        self.habit_dropdown.dismiss()
+        self._habit_key = key
+        self.habit_btn.text = _habit_preset_by_key(key)["label"]
+
     def setup_for_new(self):
         """Setup screen for creating a new reminder."""
         self.title_label.text = "New Reminder"
         self.reminder_index = None
-        self.text_input.text = ""
-        self.description_input.text = ""
-        self.icon_input.text = ""
-        self.icon_btn.text = "None"
-        self.icon_path_input.text = ""
-        self.icon_path_input.disabled = True
-        self.trigger_type_btn.text = "Specific Time"
+        self._habit_key = HEALTHY_HABIT_PRESETS[0]["key"]
+        self.habit_btn.text = _habit_preset_by_key(self._habit_key)["label"]
+        self._reminder_icon_text = None
+        self.interval_input.text = "30"
         self.time_input.text = "12:00"
         self.am_pm_btn.text = "PM"
-        self.time_input.disabled = False
-        self.interval_input.text = "5"
-        self.interval_input.disabled = True
         self.repeat_btn.text = "daily"
-        self.use_face_expr.state = "normal"
-        self.fe_eyes_btn.text = "None"
-        self.fe_mouth_btn.text = "None"
-        self.mood_btn.text = "happy"
         self.is_active_toggle.state = "down"
         self.error_label.text = ""
-        # Update disabled state and appearance
-        self.on_face_expr_toggle(self.use_face_expr, "normal")
-    
+        self.select_trigger_type("Every X Minutes")
+
     def setup_for_edit(self, index):
         """Setup screen for editing an existing reminder."""
         self.title_label.text = "Edit Reminder"
@@ -1768,78 +1617,24 @@ class ReminderEditScreen(Screen):
         reminders = config_manager.get("reminders", [])
         if 0 <= index < len(reminders):
             reminder = reminders[index]
-            self.text_input.text = reminder.get("text", "")
-            self.description_input.text = reminder.get("description", "")
-            self.icon_input.text = reminder.get("icon", "")
-            # Load icon_path (handle both relative and absolute paths)
-            icon_path = reminder.get("icon_path")
-            if icon_path:
-                # Normalize to relative path for comparison
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                if os.path.isabs(icon_path):
-                    # Convert absolute to relative if in project
-                    if icon_path.startswith(script_dir):
-                        icon_path_rel = os.path.relpath(icon_path, script_dir)
-                    else:
-                        icon_path_rel = icon_path  # Keep absolute if outside project
-                else:
-                    icon_path_rel = icon_path
-                
-                if icon_path_rel == "assets/icons/drink_water.png":
-                    self.icon_btn.text = "Drink Water"
-                    self.icon_path_input.text = icon_path_rel
-                    self.icon_path_input.disabled = True
-                elif icon_path_rel == "assets/icons/stretch.png":
-                    self.icon_btn.text = "Stretch"
-                    self.icon_path_input.text = icon_path_rel
-                    self.icon_path_input.disabled = True
-                else:
-                    self.icon_btn.text = "Custom Path"
-                    self.icon_path_input.text = icon_path_rel
-                    self.icon_path_input.disabled = False
-            else:
-                self.icon_btn.text = "None"
-                self.icon_path_input.text = ""
-                self.icon_path_input.disabled = True
-            
-            # Load trigger type and values
+            preset = _habit_preset_for_reminder(reminder)
+            self._habit_key = preset["key"]
+            self.habit_btn.text = preset["label"]
+            self._reminder_icon_text = reminder.get("icon")
             trigger_type = reminder.get("trigger_type", "Specific Time")
-            self.trigger_type_btn.text = trigger_type
+            self.select_trigger_type(trigger_type)
             if trigger_type == "Every X Minutes":
-                self.time_input.disabled = True
-                self.interval_input.disabled = False
-                self.interval_input.text = str(reminder.get("interval_minutes", 5))
+                self.interval_input.text = str(reminder.get("interval_minutes", 30))
             else:
-                self.time_input.disabled = False
-                self.interval_input.disabled = True
-                # Load 24h time and show as 12h + AM/PM
                 stored_time = reminder.get("trigger_time", "12:00")
                 display_12h, display_am_pm = self._time_24h_to_12h_display(stored_time)
                 self.time_input.text = display_12h
                 self.am_pm_btn.text = display_am_pm
-            
             self.repeat_btn.text = reminder.get("repeat_settings", "daily")
-            
-            face_expr = reminder.get("face_expression")
-            if face_expr and isinstance(face_expr, dict):
-                self.use_face_expr.state = "down"
-                self.fe_eyes_btn.text = face_expr.get("eyes") or "None"
-                self.fe_mouth_btn.text = face_expr.get("mouth") or "None"
-                self.mood_btn.text = face_expr.get("mood", "happy")
-            else:
-                self.use_face_expr.state = "normal"
-                self.fe_eyes_btn.text = "None"
-                self.fe_mouth_btn.text = "None"
-                self.mood_btn.text = reminder.get("mood", "happy")
-            
             self.is_active_toggle.state = "down" if reminder.get("is_active", True) else "normal"
-            # Update disabled state and appearance
-            self.on_face_expr_toggle(self.use_face_expr, self.use_face_expr.state)
         self.error_label.text = ""
-        
-        # Scroll to top when editing
-        if hasattr(self, 'scroll'):
-            Clock.schedule_once(lambda dt: setattr(self.scroll, 'scroll_y', 1.0), 0.1)
+        if hasattr(self, "scroll"):
+            Clock.schedule_once(lambda dt: setattr(self.scroll, "scroll_y", 1.0), 0.1)
     
     def _select_am_pm(self, option):
         """Handle AM/PM selection."""
@@ -1881,75 +1676,47 @@ class ReminderEditScreen(Screen):
         except (ValueError, IndexError):
             return "12:00", "PM"
 
-    def select_trigger_type(self, option):
-        """Handle trigger type selection (Time vs Interval)."""
+    def select_trigger_type(self, stored):
+        """Every X minutes vs clock time — must match JSON values expected by voice_reminder_tick."""
         self.trigger_type_dropdown.dismiss()
-        self.trigger_type_btn.text = option
-        # Enable/disable inputs based on type
-        if option == "Every X Minutes":
+        self._trigger_type_stored = stored
+        self.trigger_type_btn.text = _TRIGGER_LABELS.get(stored, stored)
+        if stored == "Every X Minutes":
             self.time_input.disabled = True
+            self.am_pm_btn.disabled = True
             self.interval_input.disabled = False
+            self.repeat_container.height = 0
+            self.repeat_container.opacity = 0
+            self.repeat_container.disabled = True
         else:
             self.time_input.disabled = False
+            self.am_pm_btn.disabled = False
             self.interval_input.disabled = True
-    
+            self.repeat_container.height = dp(50)
+            self.repeat_container.opacity = 1
+            self.repeat_container.disabled = False
+
     def select_repeat(self, option):
         """Handle repeat selection."""
         self.repeat_dropdown.dismiss()
         self.repeat_btn.text = option
-    
-    def _select_icon(self, icon_path, label):
-        """Handle icon selection from dropdown."""
-        self.icon_dropdown.dismiss()
-        self.icon_btn.text = label
-        if icon_path == "CUSTOM":
-            # Enable custom path input
-            self.icon_path_input.disabled = False
-            self.icon_path_input.text = ""
-        elif icon_path is None:
-            # None selected
-            self.icon_path_input.disabled = True
-            self.icon_path_input.text = ""
-        else:
-            # Predefined icon selected - use relative path
-            self.icon_path_input.disabled = True
-            # icon_path is already relative from the dropdown options
-            self.icon_path_input.text = icon_path
-    
-    def select_fe_eyes(self, option):
-        """Handle face expression eyes selection."""
-        self.fe_eyes_dropdown.dismiss()
-        self.fe_eyes_btn.text = option
-    
-    def select_fe_mouth(self, option):
-        """Handle face expression mouth selection."""
-        self.fe_mouth_dropdown.dismiss()
-        self.fe_mouth_btn.text = option
-    
-    def select_mood(self, option):
-        """Handle mood selection."""
-        self.mood_dropdown.dismiss()
-        self.mood_btn.text = option
-    
+
     def save(self, instance):
-        """Save the reminder with validation."""
-        trigger_type = self.trigger_type_btn.text
-        
-        # Validate based on trigger type
+        """Save habit preset + schedule (same schema as voice assistant + homescreen)."""
+        trigger_type = self._trigger_type_stored
         if trigger_type == "Every X Minutes":
-            # Validate interval
             try:
                 interval_minutes = int(self.interval_input.text.strip())
-                if interval_minutes < 1 or interval_minutes > 1440:  # Max 24 hours
+                if interval_minutes < 1 or interval_minutes > 1440:
                     raise ValueError
-                trigger_time = None  # Not used for interval reminders
+                trigger_time = None
             except ValueError:
                 self.error_label.text = "Invalid interval (1-1440 minutes)"
                 return
+            repeat_settings = "daily"
         else:
-            # Validate trigger time (12-hour + AM/PM) and convert to 24-hour for storage
             time_str = self.time_input.text.strip()
-            am_pm = self.am_pm_btn.text  # "AM" or "PM"
+            am_pm = self.am_pm_btn.text
             if not time_str:
                 self.error_label.text = "Trigger time is required"
                 return
@@ -1957,144 +1724,90 @@ class ReminderEditScreen(Screen):
             if trigger_time is None:
                 self.error_label.text = "Invalid time (use e.g. 2:30 with AM/PM)"
                 return
-            interval_minutes = None  # Not used for time-based reminders
-        
-        # Validate face expression constraint
-        face_expression = None
-        if self.use_face_expr.state == "down":
-            fe_eyes = None if self.fe_eyes_btn.text == "None" else self.fe_eyes_btn.text
-            fe_mouth = None if self.fe_mouth_btn.text == "None" else self.fe_mouth_btn.text
-            
-            # Constraint: face_expression requires eyes OR mouth
-            if fe_eyes is None and fe_mouth is None:
-                self.error_label.text = "Face expression requires eyes or mouth"
-                return
-            
-            face_expression = {
-                "eyes": fe_eyes,
-                "mouth": fe_mouth,
-                "mood": self.mood_btn.text
-            }
-        
-        # Get or create stable reminder ID
+            interval_minutes = None
+            repeat_settings = self.repeat_btn.text
+
+        preset = _habit_preset_by_key(self._habit_key)
+        legacy_icon = getattr(self, "_reminder_icon_text", None)
+        if isinstance(legacy_icon, str):
+            legacy_icon = legacy_icon.strip() or None
+
         reminders = config_manager.get("reminders", [])
-        reminder_id = None
-        
         if self.reminder_index is not None and 0 <= self.reminder_index < len(reminders):
-            # Editing existing reminder - preserve ID
             existing_reminder = reminders[self.reminder_index]
-            reminder_id = existing_reminder.get("id")
-            if not reminder_id:
-                # Legacy reminder without ID - generate one
-                reminder_id = str(uuid.uuid4())
+            reminder_id = existing_reminder.get("id") or str(uuid.uuid4())
         else:
-            # Creating new reminder - generate new UUID
             reminder_id = str(uuid.uuid4())
-        
-        # Get icon_path from icon_path_input or from icon_btn selection (store as relative path)
-        icon_path = None
-        if self.icon_path_input.text.strip():
-            path = self.icon_path_input.text.strip()
-            # Convert absolute path to relative if it's in the project
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            if os.path.isabs(path) and path.startswith(script_dir):
-                icon_path = os.path.relpath(path, script_dir)
-            else:
-                icon_path = path  # Already relative or custom absolute
-        elif self.icon_btn.text not in ("None", "Custom Path"):
-            # Predefined icon selected - use relative path
-            if self.icon_btn.text == "Drink Water":
-                icon_path = "assets/icons/drink_water.png"
-            elif self.icon_btn.text == "Stretch":
-                icon_path = "assets/icons/stretch.png"
-        
-        # Create reminder object with all fields
+
+        accent = [float(x) for x in preset["accent"][:4]]
+        if len(accent) == 3:
+            accent.append(1.0)
+
         reminder = {
-            "id": reminder_id,  # Stable UUID
-            "text": self.text_input.text.strip() or None,  # nullable
-            "icon": self.icon_input.text.strip() or None,  # nullable (text icon for backward compatibility)
-            "icon_path": icon_path,  # nullable (image file path)
-            "face_expression": face_expression,  # nullable (dict with eyes, mouth, mood)
-            "trigger_type": trigger_type,  # "Specific Time" or "Every X Minutes"
-            "trigger_time": trigger_time,  # Time string (HH:MM) or None for interval
-            "interval_minutes": interval_minutes,  # Minutes interval or None for time-based
-            "repeat_settings": self.repeat_btn.text,  # Required
-            "is_active": self.is_active_toggle.state == "down",  # Required
-            "accent": config_manager.get("default_colors.primary", [0.10, 0.90, 1.00, 1.0]),
-            "mood": self.mood_btn.text,  # Default mood (used if no face_expression)
-            "description": self.description_input.text.strip() or ""  # Separate description field
+            "id": reminder_id,
+            "text": preset["text"],
+            "icon": legacy_icon,
+            "icon_path": preset.get("icon_path"),
+            "action": preset.get("action"),
+            "face_expression": None,
+            "trigger_type": trigger_type,
+            "trigger_time": trigger_time,
+            "interval_minutes": interval_minutes,
+            "repeat_settings": repeat_settings,
+            "is_active": self.is_active_toggle.state == "down",
+            "accent": accent,
+            "mood": preset["mood"],
+            "description": preset["description"],
         }
-        
-        # Save to config
+
         if self.reminder_index is not None and 0 <= self.reminder_index < len(reminders):
             reminders[self.reminder_index] = reminder
         else:
             reminders.append(reminder)
         config_manager.set("reminders", reminders)
-        
-        # Clear error message
         self.error_label.text = ""
-        
-        # Return to reminders screen (will refresh automatically via on_pre_enter)
         self.manager.current = "reminders"
-    
+
     def _build_reminder_dict_for_test(self):
         """Build a reminder dict from current form for 'Test in 10 sec' (no save)."""
-        face_expression = None
-        if self.use_face_expr.state == "down":
-            fe_eyes = None if self.fe_eyes_btn.text == "None" else self.fe_eyes_btn.text
-            fe_mouth = None if self.fe_mouth_btn.text == "None" else self.fe_mouth_btn.text
-            if fe_eyes is not None or fe_mouth is not None:
-                face_expression = {
-                    "eyes": fe_eyes,
-                    "mouth": fe_mouth,
-                    "mood": self.mood_btn.text
-                }
-        trigger_type = self.trigger_type_btn.text
+        trigger_type = self._trigger_type_stored
         trigger_time = None
         interval_minutes = None
+        repeat_settings = "daily"
         if trigger_type == "Every X Minutes":
             try:
                 interval_minutes = int(self.interval_input.text.strip())
                 interval_minutes = max(1, min(1440, interval_minutes))
             except ValueError:
-                interval_minutes = 5
+                interval_minutes = 30
         else:
             time_str = self.time_input.text.strip()
             am_pm = self.am_pm_btn.text
             trigger_time = self._time_12h_to_24h(time_str, am_pm) if time_str else "12:00"
-        accent = config_manager.get("default_colors.primary", [0.10, 0.90, 1.00, 1.0])
-        if isinstance(accent, list):
-            accent = list(accent)
-        # Get icon_path for test reminder (use relative paths)
-        icon_path = None
-        if hasattr(self, 'icon_path_input') and self.icon_path_input.text.strip():
-            path = self.icon_path_input.text.strip()
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            if os.path.isabs(path) and path.startswith(script_dir):
-                icon_path = os.path.relpath(path, script_dir)
-            else:
-                icon_path = path
-        elif hasattr(self, 'icon_btn') and self.icon_btn.text not in ("None", "Custom Path"):
-            if self.icon_btn.text == "Drink Water":
-                icon_path = "assets/icons/drink_water.png"
-            elif self.icon_btn.text == "Stretch":
-                icon_path = "assets/icons/stretch.png"
-        
+            repeat_settings = self.repeat_btn.text
+
+        preset = _habit_preset_by_key(self._habit_key)
+        accent = [float(x) for x in preset["accent"][:4]]
+        if len(accent) == 3:
+            accent.append(1.0)
+        legacy_icon = getattr(self, "_reminder_icon_text", None)
+        if isinstance(legacy_icon, str):
+            legacy_icon = legacy_icon.strip() or None
         return {
             "id": str(uuid.uuid4()),
-            "text": self.text_input.text.strip() or "Test reminder",
-            "icon": self.icon_input.text.strip() if hasattr(self, 'icon_input') else None,
-            "icon_path": icon_path,
-            "face_expression": face_expression,
+            "text": preset["text"],
+            "icon": legacy_icon,
+            "icon_path": preset.get("icon_path"),
+            "action": preset.get("action"),
+            "face_expression": None,
             "trigger_type": trigger_type,
             "trigger_time": trigger_time,
             "interval_minutes": interval_minutes,
-            "repeat_settings": self.repeat_btn.text,
+            "repeat_settings": repeat_settings,
             "is_active": True,
             "accent": accent,
-            "mood": self.mood_btn.text,
-            "description": self.description_input.text.strip() or ""
+            "mood": preset["mood"],
+            "description": preset["description"],
         }
 
     def test_in_10_seconds(self, instance):
@@ -2104,27 +1817,38 @@ class ReminderEditScreen(Screen):
         self.error_label.text = "Switching to Home in 10 sec..."
         def _show_test_reminder(dt):
             self.error_label.text = ""
-            homescreen = self.manager.get_screen("homescreen")
-            homescreen._return_screen = from_screen
             # If a real reminder is set for current time, show that instead of the test reminder
             now = datetime.now()
             current_time = now.strftime("%H:%M")
             reminders = config_manager.get("reminders", [])
             real_reminder = None
+            homescreen = self.manager.get_screen("homescreen") if self.manager.has_screen("homescreen") else None
             for r in reminders:
                 if not r.get("is_active", True):
                     continue
                 if r.get("trigger_type") != "Specific Time":
                     continue
                 raw = r.get("trigger_time", "")
-                normalized = homescreen._normalize_trigger_time(raw) if hasattr(homescreen, "_normalize_trigger_time") else raw
+                normalized = (
+                    homescreen._normalize_trigger_time(raw)
+                    if homescreen and hasattr(homescreen, "_normalize_trigger_time")
+                    else raw
+                )
                 if normalized == current_time:
                     real_reminder = r
                     break
             display_reminder = real_reminder if real_reminder else reminder
-            self.manager.current = "homescreen"
-            if hasattr(homescreen, "trigger_reminder"):
-                homescreen.trigger_reminder(display_reminder, is_real_trigger=False)
+            app = App.get_running_app()
+            if self.manager.has_screen("voice") and getattr(app, "engine", None):
+                self.manager.current = "voice"
+                app.engine.fire_reminder_display(display_reminder, return_screen=from_screen)
+            else:
+                if not homescreen:
+                    return
+                homescreen._return_screen = from_screen
+                self.manager.current = "homescreen"
+                if hasattr(homescreen, "trigger_reminder"):
+                    homescreen.trigger_reminder(display_reminder, is_real_trigger=False)
         Clock.schedule_once(_show_test_reminder, 10.0)
 
     def cancel(self, instance):
@@ -2133,16 +1857,7 @@ class ReminderEditScreen(Screen):
 
 
 class RemindersScreen(Screen):
-    """
-    Reminders tool screen.
-    Allows users to create and manage reminders with:
-    - Text (nullable)
-    - Icon (nullable)
-    - Face expression (nullable, but requires eyes/mouth to be defined)
-    - Trigger Time
-    - Repeat Settings
-    - is_active flag
-    """
+    """List healthy-habit reminders; add/edit uses preset habits plus interval or clock time."""
     
     def __init__(self, **kwargs):
         """Initialize the reminders screen."""
@@ -2402,7 +2117,7 @@ class RemindersScreen(Screen):
     
     def return_home(self, instance):
         """Navigate back to homescreen."""
-        self.manager.current = "homescreen"
+        self.manager.current = app_main_nav_screen(self.manager)
 
 # ============================================================================
 # MAIN APPLICATION

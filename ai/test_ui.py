@@ -16,15 +16,22 @@ import tempfile
 import subprocess
 import re
 import wave
+import math
 import random
+import uuid
 import numpy as np
 from pathlib import Path
+from datetime import datetime
 from enum import Enum
-from dataclasses import dataclass
 from collections import deque
 from functools import partial
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
+_UI_PKG = Path(__file__).resolve().parent.parent / "ui"
+if str(_UI_PKG) not in sys.path:
+    sys.path.append(str(_UI_PKG))
+from face_customization import normalize_eye_choice, normalize_mouth_choice
+from widgets import StickFigureIcon
 
 
 def _display_size() -> tuple[int, int]:
@@ -52,7 +59,8 @@ from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.event import EventDispatcher
-from kivy.graphics import Color, RoundedRectangle
+from kivy.graphics import Color, Ellipse, Line, Mesh, RoundedRectangle
+from kivy.metrics import dp
 from kivy.lang import Builder
 from kivy.properties import (
     BooleanProperty,
@@ -61,13 +69,11 @@ from kivy.properties import (
     ObjectProperty,
     StringProperty,
 )
-from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.image import Image
 from kivy.uix.label import Label
-from kivy.uix.progressbar import ProgressBar
-from kivy.uix.scrollview import ScrollView
+from kivy.uix.screenmanager import Screen, ScreenManager, SlideTransition
 from kivy.uix.widget import Widget
 
 import sounddevice as sd
@@ -98,19 +104,579 @@ class State(Enum):
     FOLLOW_UP = "follow_up"
 
 
-@dataclass
 class UIColors:
-    BG = (15 / 255, 15 / 255, 25 / 255, 1)
-    PANEL = (25 / 255, 28 / 255, 40 / 255, 1)
-    ACCENT = (0, 1, 200 / 255, 1)
-    ACCENT_DIM = (0, 150 / 255, 120 / 255, 1)
-    PINK = (1, 50 / 255, 150 / 255, 1)
-    TEXT = (240 / 255, 240 / 255, 250 / 255, 1)
-    TEXT_DIM = (140 / 255, 145 / 255, 165 / 255, 1)
-    SUCCESS = (50 / 255, 1, 120 / 255, 1)
-    ERROR = (1, 80 / 255, 80 / 255, 1)
-    ORANGE = (1, 150 / 255, 50 / 255, 1)
-    PURPLE = (150 / 255, 50 / 255, 1, 1)
+    """Blue screen background; accent colors for UI chrome elsewhere."""
+    BG = (0.38, 0.58, 0.88, 1)
+    BG_BLOB_A = (0.48, 0.72, 0.95, 0.35)
+    BG_BLOB_B = (0.28, 0.42, 0.78, 0.4)
+    PANEL = (1.0, 0.995, 1.0, 1)
+    PANEL_BOT = (0.99, 0.98, 0.99, 1)
+    ACCENT = (0.28, 0.55, 0.82, 1)
+    ACCENT_DIM = (0.48, 0.62, 0.82, 1)
+    PINK = (0.94, 0.48, 0.58, 1)
+    MINT = (0.45, 0.78, 0.68, 1)
+    TEXT = (0.16, 0.19, 0.24, 1)
+    TEXT_DIM = (0.44, 0.47, 0.52, 1)
+    SUCCESS = (0.34, 0.72, 0.52, 1)
+    ERROR = (0.92, 0.45, 0.52, 1)
+    ORANGE = (0.96, 0.62, 0.38, 1)
+    PURPLE = (0.62, 0.5, 0.9, 1)
+    CARD_BORDER = (0.86, 0.9, 0.94, 1)
+    WAVE_BG = (0.93, 0.96, 0.99, 1)
+    FACE_RING = (0.88, 0.92, 0.98, 1)
+
+
+def _ease_in_quad(t: float) -> float:
+    t = max(0.0, min(1.0, t))
+    return t * t
+
+
+def _ease_out_quad(t: float) -> float:
+    t = max(0.0, min(1.0, t))
+    return t * (2.0 - t)
+
+
+_UI_CM = None
+
+
+def _get_ui_config_manager():
+    """Load ui/vidatron_config.json (avoids clashing with ai ``config`` on sys.path)."""
+    global _UI_CM
+    if _UI_CM is None:
+        import importlib.util
+
+        p = Path(__file__).resolve().parent.parent / "ui" / "config.py"
+        spec = importlib.util.spec_from_file_location("vidatron_ui_cfg", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _UI_CM = mod.config_manager
+    return _UI_CM
+
+
+def _voice_repeat_allows(repeat_settings: str, now: datetime) -> bool:
+    if repeat_settings == "once":
+        return True
+    if repeat_settings == "daily":
+        return True
+    if repeat_settings == "weekdays":
+        return now.weekday() < 5
+    if repeat_settings == "weekends":
+        return now.weekday() >= 5
+    if repeat_settings == "weekly":
+        return True
+    return True
+
+
+def _voice_normalize_trigger_time(time_str: str) -> str:
+    if not time_str or not isinstance(time_str, str):
+        return ""
+    parts = time_str.strip().split(":")
+    if len(parts) != 2:
+        return ""
+    try:
+        h, m = int(parts[0]), int(parts[1])
+        if h < 0 or h > 23 or m < 0 or m > 59:
+            return ""
+        return f"{h:02d}:{m:02d}"
+    except (ValueError, TypeError):
+        return ""
+
+
+def _reminder_stick_action(reminder: dict) -> str:
+    """Map a reminder to a stick-figure animation id (drink | stretch | wave)."""
+    a = (reminder.get("action") or "").strip().lower()
+    if a in ("drink", "stretch", "wave"):
+        return a
+    t = (reminder.get("text") or "").lower()
+    ip = (reminder.get("icon_path") or "").lower()
+    if "drink" in t or "water" in t or "hydrat" in t or "drink_water" in ip:
+        return "drink"
+    if (
+        "stretch" in t
+        or "yoga" in t
+        or any(k in t for k in ("stand", "break", "exercise", "walk", "jog"))
+        or "get up" in t
+    ):
+        return "stretch"
+    if "stretch" in ip or "stretch.png" in ip:
+        return "stretch"
+    if "drink" in ip or "water" in ip:
+        return "drink"
+    return "wave"
+
+
+def _voice_seed_interval_last_fired(cm) -> None:
+    reminders = cm.get("reminders", [])
+    last_fired = dict(cm.get("last_fired", {}))
+    now_ts = datetime.now().timestamp()
+    updated = False
+    for reminder in reminders:
+        if not reminder.get("is_active", True):
+            continue
+        if reminder.get("trigger_type", "Specific Time") != "Every X Minutes":
+            continue
+        rid = reminder.get("id")
+        if not rid:
+            continue
+        last_fired[rid] = now_ts
+        updated = True
+    if updated:
+        cm.set("last_fired", last_fired)
+
+
+def voice_reminder_tick(_dt: float) -> None:
+    app = App.get_running_app()
+    if not app or not getattr(app, "engine", None):
+        return
+    eng = app.engine
+    if eng.reminder_show:
+        return
+    sm = app.root
+    if not isinstance(sm, ScreenManager):
+        return
+
+    now = datetime.now()
+    current_time = now.strftime("%H:%M")
+    current_date = now.strftime("%Y-%m-%d")
+    current_minute = f"{current_date} {current_time}"
+    current_timestamp = now.timestamp()
+
+    cm = _get_ui_config_manager()
+    reminders = cm.get("reminders", [])
+    last_fired = dict(cm.get("last_fired", {}))
+
+    for reminder in reminders:
+        if not reminder.get("is_active", True):
+            continue
+        rid = reminder.get("id")
+        if not rid:
+            rid = str(uuid.uuid4())
+            reminder["id"] = rid
+            cm.set("reminders", reminders)
+
+        trigger_type = reminder.get("trigger_type", "Specific Time")
+        should_trigger = False
+
+        if trigger_type == "Every X Minutes":
+            interval_minutes = reminder.get("interval_minutes", 5)
+            last_fired_time = last_fired.get(rid)
+            if last_fired_time is None:
+                last_fired[rid] = current_timestamp
+                cm.set("last_fired", last_fired)
+                continue
+            try:
+                if isinstance(last_fired_time, str):
+                    last_dt = datetime.strptime(last_fired_time, "%Y-%m-%d %H:%M")
+                else:
+                    last_dt = datetime.fromtimestamp(last_fired_time)
+                minutes_passed = (now - last_dt).total_seconds() / 60.0
+                if minutes_passed >= interval_minutes:
+                    should_trigger = True
+            except (ValueError, TypeError):
+                should_trigger = True
+        else:
+            raw_trigger = reminder.get("trigger_time", "")
+            trigger_time = _voice_normalize_trigger_time(raw_trigger)
+            if not trigger_time or trigger_time != current_time:
+                continue
+            if last_fired.get(rid) == current_minute:
+                continue
+            should_trigger = True
+
+        if not should_trigger:
+            continue
+
+        if trigger_type == "Specific Time":
+            repeat_settings = reminder.get("repeat_settings", "once")
+            if not _voice_repeat_allows(repeat_settings, now):
+                continue
+
+        if sm.current != "voice":
+            sm.current = "voice"
+        eng.fire_reminder_display(reminder, return_screen=None)
+
+        if trigger_type == "Every X Minutes":
+            last_fired[rid] = current_timestamp
+        else:
+            last_fired[rid] = current_minute
+        cm.set("last_fired", last_fired)
+
+        if trigger_type == "Specific Time" and reminder.get("repeat_settings") == "once":
+            reminder["is_active"] = False
+            cm.set("reminders", reminders)
+        break
+
+
+class CuteMascotWidget(Widget):
+    """Large-eyed vector mascot with realistic blink timing and speech-shaped mouth motion."""
+
+    engine = ObjectProperty(None, allownone=True)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        now = time.monotonic()
+        self._blink_phase = 0
+        self._blink_t0 = now
+        self._next_blink_at = now + random.uniform(2.2, 4.2)
+        self._blink_amount = 0.0
+        self._chained_second_blink = False
+        Clock.schedule_interval(self._tick, 1 / 60.0)
+
+    def _advance_blink(self, now: float) -> None:
+        """Finite-state blink: quick close, short hold, smooth open; random intervals + rare double-blink."""
+        if self._blink_phase == 0:
+            if now >= self._next_blink_at:
+                self._blink_phase = 1
+                self._blink_t0 = now
+            return
+
+        if self._blink_phase == 1:
+            u = (now - self._blink_t0) / 0.048
+            self._blink_amount = _ease_in_quad(min(1.0, u))
+            if u >= 1.0:
+                self._blink_phase = 2
+                self._blink_t0 = now
+            return
+
+        if self._blink_phase == 2:
+            self._blink_amount = 1.0
+            if now - self._blink_t0 > 0.042:
+                self._blink_phase = 3
+                self._blink_t0 = now
+            return
+
+        if self._blink_phase == 3:
+            u = (now - self._blink_t0) / 0.085
+            self._blink_amount = 1.0 - _ease_out_quad(min(1.0, u))
+            if u >= 1.0:
+                self._blink_phase = 0
+                self._blink_amount = 0.0
+                if self._chained_second_blink:
+                    self._chained_second_blink = False
+                    self._next_blink_at = now + random.uniform(2.6, 4.8)
+                elif random.random() < 0.13:
+                    self._chained_second_blink = True
+                    self._next_blink_at = now + 0.11
+                else:
+                    self._next_blink_at = now + random.uniform(2.6, 4.8)
+
+    def _mouth_speaking(self, af: float) -> tuple[float, float]:
+        """Jaw 0..1 + mouth width factor — layered sines (syllable + ripple + micro) like earlier viseme motion."""
+        t = af * 0.028
+        syllable = 0.5 + 0.5 * math.sin(t)
+        ripple = 0.2 * math.sin(t * 2.65 + 0.4)
+        micro = 0.07 * math.sin(t * 5.1)
+        jaw = max(0.06, min(1.0, 0.15 + 0.74 * syllable + ripple + micro))
+        width = 0.9 + 0.16 * abs(math.sin(t * 1.85 + 0.2))
+        return jaw, width
+
+    def _tick(self, _dt):
+        self._advance_blink(time.monotonic())
+        if self.engine:
+            self.engine.animation_frame = self.engine.animation_frame + 1
+        self._draw()
+
+    def _draw(self):
+        self.canvas.after.clear()
+        if not self.width or not self.height:
+            return
+        eng = self.engine
+        if not eng:
+            return
+        st = eng.display_state
+        af = float(eng.animation_frame)
+        cx = self.x + self.width / 2
+        cy = self.y + self.height / 2
+        r = min(self.width, self.height) * 0.53
+        cy_f = cy - r * 0.12
+        blink = self._blink_amount
+        is_thinking = st == "thinking"
+        think_t = af * 0.065
+
+        eye_shape = normalize_eye_choice(getattr(eng, "selected_eyes", None))
+        mouth_shape = normalize_mouth_choice(getattr(eng, "selected_mouth", None))
+
+        ex = r * 0.42
+        ey = r * 0.1
+        eye_d = r * 0.56
+        eye_scale_w = 1.0
+        eye_scale_h = 1.0
+        eye_off_y = 0.0
+        iris_mul = 1.0
+        pupil_mul = 1.0
+        if eye_shape == "Round":
+            pass
+        elif eye_shape == "Narrow":
+            eye_scale_w = 0.54
+            eye_scale_h = 1.14
+            ex *= 0.93
+            eye_off_y = -r * 0.02
+            iris_mul = 0.9
+            pupil_mul = 0.88
+        elif eye_shape == "Wide":
+            eye_scale_w = 1.48
+            eye_scale_h = 0.84
+            ex *= 1.09
+            eye_off_y = -r * 0.04
+            iris_mul = 1.1
+            pupil_mul = 1.06
+        elif eye_shape == "Small":
+            eye_scale_w = 0.68
+            eye_scale_h = 0.68
+            ex *= 0.91
+            iris_mul = 0.76
+            pupil_mul = 0.74
+
+        listen_wide = 1.04 if st == "listening" else 1.0
+        think_squint = 0.88 if is_thinking else 1.0
+        squish = max(0.06, 1.0 - blink)
+        d_full = eye_d * listen_wide * think_squint
+        ew = d_full * eye_scale_w
+        eh = d_full * squish * eye_scale_h
+        eye_y0 = ey + eye_off_y
+
+        with self.canvas.after:
+            # rosy cheeks (no head circle — floating face on blue)
+            cheek_boost = 0.1 * math.sin(af * 0.2) if st == "speaking" else 0.0
+            Color(1.0, 0.62 + cheek_boost * 0.12, 0.72 + cheek_boost * 0.08, 0.5 + cheek_boost * 0.1)
+            Ellipse(pos=(cx - r * 0.9, cy_f - r * 0.22), size=(r * 0.38, r * 0.24))
+            Ellipse(pos=(cx + r * 0.54, cy_f - r * 0.22), size=(r * 0.38, r * 0.24))
+
+            # Thought bubbles first (under eyes) — beside top of right eye
+            if is_thinking:
+                bob = math.sin(think_t * 1.1) * r * 0.028
+                bx0 = cx + ex + d_full * 0.32
+                by0 = cy_f + eye_y0 + d_full * 0.92 + bob
+                Color(0.93, 0.94, 0.98, 0.58)
+                Ellipse(pos=(bx0 - r * 0.08, by0 - r * 0.06), size=(r * 0.16, r * 0.11))
+                Color(1, 1, 1, 0.92)
+                Ellipse(pos=(bx0 + r * 0.14, by0 + r * 0.1), size=(r * 0.26, r * 0.2))
+                Ellipse(pos=(bx0 + r * 0.42, by0 + r * 0.2), size=(r * 0.16, r * 0.14))
+                Color(0.88, 0.9, 0.95, 0.88)
+                Line(circle=(bx0 + r * 0.28, by0 + r * 0.14, r * 0.13), width=1.45)
+                Line(circle=(bx0 + r * 0.52, by0 + r * 0.25, r * 0.08), width=1.35)
+
+            # --- Eyes: shape from Round / Narrow / Wide / Small ---
+            gaze_up = r * 0.1 * math.sin(think_t * 0.88) if is_thinking else 0.0
+            gaze_x = r * 0.04 * math.cos(think_t * 0.52) if is_thinking else r * 0.015 * math.sin(af * 0.04)
+            off_x = gaze_x
+            px_shift = gaze_x * 1.2
+            px_left = px_shift
+            px_right = px_shift
+            Color(1, 1, 1, 1)
+            Ellipse(
+                pos=(cx - ex - ew / 2 + off_x, cy_f + eye_y0 + (d_full - eh) / 2),
+                size=(ew, eh),
+            )
+            Ellipse(
+                pos=(cx + ex - ew / 2 + off_x, cy_f + eye_y0 + (d_full - eh) / 2),
+                size=(ew, eh),
+            )
+
+            # eyebrows — thinking: gentle inner tilt (very thick strokes)
+            brow_y = cy_f + eye_y0 + d_full * 0.88
+            if is_thinking:
+                Color(0.52, 0.4, 0.42, 0.92)
+                Line(
+                    points=[cx - ex - ew * 0.48, brow_y, cx - ex + ew * 0.12, brow_y + r * 0.05],
+                    width=8.4,
+                )
+                Line(
+                    points=[cx + ex + ew * 0.48, brow_y, cx + ex - ew * 0.12, brow_y + r * 0.05],
+                    width=8.4,
+                )
+            elif st == "listening":
+                bo = r * 0.018
+                bi = r * 0.052
+                Color(0.5, 0.4, 0.44, 0.9)
+                Line(
+                    points=[
+                        cx - ex - ew * 0.5,
+                        brow_y - bo,
+                        cx - ex + ew * 0.1,
+                        brow_y + bi,
+                    ],
+                    width=6.0,
+                )
+                Line(
+                    points=[
+                        cx + ex + ew * 0.5,
+                        brow_y - bo,
+                        cx + ex - ew * 0.1,
+                        brow_y + bi,
+                    ],
+                    width=6.0,
+                )
+
+            iris = r * 0.34 * (0.38 + 0.62 * squish) * iris_mul
+            pupil = r * 0.26 * (0.35 + 0.65 * squish) * pupil_mul
+            py = cy_f + eye_y0 + d_full * 0.5 - gaze_up
+            if squish > 0.12:
+                Color(0.32, 0.55, 0.78, 1)
+                Ellipse(
+                    pos=(cx - ex - iris / 2 + off_x + px_left, py - iris / 2),
+                    size=(iris, iris),
+                )
+                Ellipse(
+                    pos=(cx + ex - iris / 2 + off_x + px_right, py - iris / 2),
+                    size=(iris, iris),
+                )
+                Color(0.12, 0.14, 0.2, 1)
+                Ellipse(
+                    pos=(cx - ex - pupil / 2 + off_x + px_left, py - pupil / 2),
+                    size=(pupil, pupil),
+                )
+                Ellipse(
+                    pos=(cx + ex - pupil / 2 + off_x + px_right, py - pupil / 2),
+                    size=(pupil, pupil),
+                )
+                Color(1, 1, 1, 0.95)
+                hi = r * 0.048
+                Ellipse(
+                    pos=(cx - ex - iris * 0.35 + off_x + px_left, py + iris * 0.15),
+                    size=(hi, hi),
+                )
+                Ellipse(
+                    pos=(cx + ex - iris * 0.15 + off_x + px_right, py + iris * 0.12),
+                    size=(hi * 0.85, hi * 0.85),
+                )
+
+            if 0.15 < blink < 0.92:
+                Color(0.42, 0.52, 0.68, 0.75)
+                lw = 2.4
+                lx = cx - ex + off_x
+                Line(
+                    points=self._lid_pts(lx, cy_f + eye_y0 + d_full * 0.35, ew * 0.42, blink),
+                    width=lw,
+                )
+                lx = cx + ex + off_x
+                Line(
+                    points=self._lid_pts(lx, cy_f + eye_y0 + d_full * 0.35, ew * 0.42, blink),
+                    width=lw,
+                )
+
+            # sparkles — idle / follow-up (not while thinking)
+            if st in ("waiting", "follow_up"):
+                Color(1, 0.94, 0.55, 0.82)
+                Ellipse(pos=(cx - r * 0.92, cy_f + r * 0.52), size=(r * 0.11, r * 0.11))
+                Ellipse(pos=(cx + r * 0.78, cy_f + r * 0.48), size=(r * 0.09, r * 0.09))
+
+            # --- Mouth: Small / Wide / Neutral ---
+            mouth_w_mul = 1.0
+            idle_line_w = 3.15
+            smile_b = -0.12
+            if mouth_shape == "Wide":
+                mouth_w_mul = 1.26
+                idle_line_w = 3.75
+                smile_b = -0.16
+            elif mouth_shape == "Small":
+                mouth_w_mul = 0.74
+                idle_line_w = 2.55
+                smile_b = -0.078
+            else:
+                # Neutral
+                mouth_w_mul = 1.0
+                idle_line_w = 2.95
+
+            mouth_cy = cy_f + r * 0.09
+            smile_w = r * 0.52 * mouth_w_mul
+            mouth_y = mouth_cy + r * 0.02
+
+            if st == "speaking":
+                mouth_speak_cy = mouth_cy - r * 0.055
+                jaw, wfac = self._mouth_speaking(af)
+                w_m = r * (0.36 + 0.14 * wfac) * mouth_w_mul
+                gap = r * (0.02 + 0.12 * jaw)
+                if mouth_shape == "Neutral":
+                    gap *= 0.72
+                du = gap * 0.42
+                dl = gap * 0.58
+                lip_u, lip_lo = self._speaking_lip_pts(cx, mouth_speak_cy, w_m, du, dl)
+                fill_v = self._speaking_lip_fill_vertices(lip_u, lip_lo)
+                Color(0.42, 0.14, 0.24, 0.94)
+                Mesh(vertices=fill_v, indices=list(range(len(fill_v) // 4)), mode="triangle_strip")
+                Color(0.78, 0.42, 0.52, 1)
+                Line(points=lip_u, width=3.0)
+                Color(0.52, 0.26, 0.36, 1)
+                Line(points=lip_lo, width=2.7)
+            elif st == "listening":
+                Color(0.92, 0.55, 0.68, 1)
+                if mouth_shape == "Neutral":
+                    lw = r * 0.41 * mouth_w_mul
+                    Line(points=[cx - lw, mouth_y, cx + lw, mouth_y], width=2.05)
+                else:
+                    Line(
+                        points=self._smile_pts(cx, mouth_cy, r * 0.4 * mouth_w_mul, bulge=-0.034),
+                        width=1.55,
+                    )
+            elif is_thinking:
+                hmm = 0.5 + 0.5 * math.sin(think_t * 1.2)
+                wobble = 0.04 * math.sin(think_t * 2.1)
+                th_mul = 0.88 if mouth_shape == "Small" else 1.12 if mouth_shape == "Wide" else 1.0
+                oh = r * (0.065 + 0.062 * hmm) * mouth_w_mul**0.5 * th_mul
+                ow = r * (0.16 + 0.048 * hmm) * mouth_w_mul * th_mul
+                if mouth_shape == "Neutral":
+                    oh *= 0.85
+                    ow *= 0.88
+                Color(0.5, 0.34, 0.4, 1)
+                Ellipse(pos=(cx - ow / 2 + r * wobble, mouth_cy - oh / 2), size=(ow, oh))
+                Color(0.2, 0.1, 0.12, 0.35)
+                Ellipse(
+                    pos=(cx - ow * 0.22 + r * wobble * 0.9, mouth_cy - oh * 0.25),
+                    size=(ow * 0.44, oh * 0.45),
+                )
+            else:
+                Color(0.95, 0.52, 0.65, 1)
+                if mouth_shape == "Neutral":
+                    lw = smile_w * 0.48
+                    Line(points=[cx - lw, mouth_y, cx + lw, mouth_y], width=idle_line_w)
+                else:
+                    Line(
+                        points=self._smile_pts(cx, mouth_y, smile_w, bulge=smile_b),
+                        width=idle_line_w,
+                    )
+
+    @staticmethod
+    def _speaking_lip_pts(
+        cx: float, y_corner: float, width: float, upper_span: float, lower_span: float
+    ) -> tuple[list[float], list[float]]:
+        """Upper/lower lip polylines with identical (x,y) at both ends — mouth opens at center only."""
+        lip_u: list[float] = []
+        lip_lo: list[float] = []
+        for i in range(17):
+            t = -1.0 + (i / 16.0) * 2.0
+            x = cx + t * 0.55 * width
+            fac = 1.0 - t * t
+            lip_u.extend([x, y_corner + upper_span * fac])
+            lip_lo.extend([x, y_corner - lower_span * fac])
+        return lip_u, lip_lo
+
+    @staticmethod
+    def _speaking_lip_fill_vertices(lip_u: list[float], lip_lo: list[float]) -> list[float]:
+        """Triangle strip for Mesh: x,y,u,v per vertex; alternates upper then lower along the mouth."""
+        out: list[float] = []
+        n = len(lip_u) // 2
+        for i in range(n):
+            out.extend(
+                [lip_u[2 * i], lip_u[2 * i + 1], 0.0, 0.0, lip_lo[2 * i], lip_lo[2 * i + 1], 0.0, 0.0]
+            )
+        return out
+
+    @staticmethod
+    def _lid_pts(cx: float, cy: float, half_w: float, blink_amt: float) -> list[float]:
+        dip = half_w * 0.35 * blink_amt
+        return [cx - half_w, cy, cx, cy - dip, cx + half_w, cy]
+
+    @staticmethod
+    def _smile_pts(cx: float, cy: float, width: float, bulge: float) -> list:
+        """Quad through (-1,1): negative bulge => center dips => corners rise => smile."""
+        pts = []
+        for i in range(17):
+            t = -0.55 + i / 16 * 1.1
+            x = cx + t * width
+            y = cy + bulge * width * (1 - t * t) * 3
+            pts.extend([x, y])
+        return pts
 
 
 Builder.load_string(
@@ -122,287 +688,164 @@ Builder.load_string(
         Rectangle:
             pos: self.pos
             size: self.size
+        Color:
+            rgba: root.blob_color_a
+        Ellipse:
+            pos: self.x - dp(48), self.top - dp(140)
+            size: dp(260), dp(200)
+        Color:
+            rgba: root.blob_color_b
+        Ellipse:
+            pos: self.right - dp(120), self.y + dp(8)
+            size: dp(220), dp(180)
 
     orientation: 'vertical'
-    padding: dp(12)
-    spacing: dp(6)
+    padding: 0, 0, 0, 0
+    spacing: 0
 
-    Label:
-        text: 'Vidatron'
-        font_size: dp(28)
-        bold: True
-        color: root.accent_color
-        size_hint_y: None
-        height: dp(40)
-
-    WaveformWidget:
-        id: waveform
-        engine: root.engine
-        size_hint_y: None
-        height: dp(70)
-
-    Label:
-        id: badge
-        text: root.badge_text
-        color: root.badge_color
-        font_size: dp(16)
-        size_hint_y: None
-        height: dp(32)
-        canvas.before:
-            Color:
-                rgba: root.badge_bg_color
-            RoundedRectangle:
-                pos: self.x - dp(12), self.y - dp(4)
-                size: self.width + dp(24), self.height + dp(8)
-                radius: [dp(16),]
-
-    AnchorLayout:
-        size_hint_y: None
-        height: dp(210)
+    FloatLayout:
+        size_hint: 1, 1
+        CuteMascotWidget:
+            id: mascot
+            engine: root.engine
+            pos_hint: {'x': 0, 'y': 0}
+            size_hint: 1, 1
         Image:
             id: face_img
             source: root.face_source
             fit_mode: "contain"
-            size_hint: None, None
-            size: dp(200), dp(200)
-
-    Label:
-        text: 'You said:'
-        font_size: dp(13)
-        color: root.accent_color
-        size_hint_y: None
-        height: dp(20)
-        halign: 'left'
-        text_size: self.size
-
-    ScrollView:
-        size_hint_y: None
-        height: dp(88)
-        bar_width: dp(6)
-        Label:
-            text: root.user_panel_text
-            font_size: dp(15)
-            color: root.text_color
-            size_hint_y: None
-            height: self.texture_size[1]
-            text_size: self.width, None
-            halign: 'left'
-            valign: 'top'
-            padding: dp(8), dp(8)
+            pos_hint: {'x': 0, 'y': 0}
+            size_hint: 1, 1
+        StickFigureIcon:
+            id: reminder_stick
+            pos_hint: {'x': 0, 'y': 0}
+            size_hint: 1, 1
+            opacity: 0
+        BoxLayout:
+            orientation: 'vertical'
+            padding: dp(14)
+            spacing: dp(6)
+            size_hint: 0.94, None
+            height: dp(118)
+            pos_hint: {'center_x': 0.5, 'y': 0.035}
+            opacity: 1 if root.engine and root.engine.reminder_show else 0
+            disabled: not (root.engine and root.engine.reminder_show)
             canvas.before:
                 Color:
-                    rgba: root.user_panel_bg
+                    rgba: 0.11, 0.14, 0.22, 0.94
                 RoundedRectangle:
                     pos: self.pos
                     size: self.size
-                    radius: [dp(10),]
-
-    Label:
-        text: 'Vidatron:'
-        font_size: dp(13)
-        color: root.pink_color
-        size_hint_y: None
-        height: dp(20)
-        halign: 'left'
-        text_size: self.size
-
-    ScrollView:
-        size_hint_y: None
-        height: dp(118)
-        bar_width: dp(6)
-        Label:
-            text: root.bot_panel_text
-            font_size: dp(15)
-            color: root.text_color
-            size_hint_y: None
-            height: self.texture_size[1]
-            text_size: self.width, None
-            halign: 'left'
-            valign: 'top'
-            padding: dp(8), dp(8)
-            canvas.before:
-                Color:
-                    rgba: root.bot_panel_bg
-                RoundedRectangle:
-                    pos: self.pos
-                    size: self.size
-                    radius: [dp(10),]
-
-    BoxLayout:
-        orientation: 'vertical'
-        size_hint_y: None
-        height: dp(52)
-        opacity: 1 if root.show_wake_meter else 0
-        Label:
-            text: root.wake_meter_label
-            font_size: dp(12)
-            color: root.text_dim_color
-            size_hint_y: None
-            height: dp(18)
-            halign: 'left'
-        ProgressBar:
-            id: wake_pb
-            max: 1
-            value: 0
-            size_hint_y: None
-            height: dp(14)
-
-    Widget:
-        size_hint_y: 1
-
-    Label:
-        text: root.status_message
-        font_size: dp(12)
-        color: root.text_dim_color
-        size_hint_y: None
-        height: dp(22)
-
-    Label:
-        text: root.hint_text
-        font_size: dp(11)
-        color: root.text_dim_color
-        size_hint_y: None
-        height: dp(36)
-        text_size: self.width, None
+                    radius: [dp(14),]
+            Label:
+                text: root.engine.reminder_caption if root.engine else ''
+                color: 1, 1, 1, 1
+                font_size: '18sp'
+                bold: True
+                size_hint_y: None
+                height: max(dp(26), self.texture_size[1])
+                text_size: self.width - dp(8), None
+                halign: 'center'
+                valign: 'middle'
+            Label:
+                text: root.engine.reminder_detail if root.engine else ''
+                color: 0.92, 0.94, 0.98, 1
+                font_size: '15sp'
+                size_hint_y: None
+                height: max(dp(36), self.texture_size[1])
+                text_size: self.width - dp(8), None
+                halign: 'center'
+                valign: 'top'
 """
 )
-
-
-class WaveformWidget(Widget):
-    engine = ObjectProperty(None, allownone=True)
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._pulse = 0.0
-        Clock.schedule_interval(self._tick, 1 / 30.0)
-
-    def _tick(self, _dt):
-        if self.engine:
-            if getattr(self.engine, "playback_active", False):
-                return
-            self.engine.animation_frame = self.engine.animation_frame + 1
-        self._pulse += 0.08
-        self._draw()
-
-    def _draw(self):
-        self.canvas.after.clear()
-        if not self.width or not self.height:
-            return
-        eng = self.engine
-        if not eng:
-            return
-        st = eng.display_state
-        af = int(eng.animation_frame)
-        al = eng.audio_level
-        wc = eng.wake_word_confidence
-
-        num_bars = 15
-        bar_w = 8
-        spacing = 12
-        total_w = num_bars * spacing
-        start_x = self.x + (self.width - total_w) / 2
-        cy = self.y + self.height / 2
-
-        for i in range(num_bars):
-            if st == "listening":
-                wave = np.sin(af * 0.15 + i * 0.5)
-                h = max(4, int(5 + al * 40 * (0.5 + 0.5 * abs(wave))))
-                rgba = UIColors.ERROR
-            elif st == "speaking":
-                wave = np.sin(af * 0.2 + i * 0.4)
-                h = max(8, int(10 + 25 * (0.5 + 0.5 * abs(wave))))
-                rgba = UIColors.SUCCESS
-            elif st == "thinking":
-                wave = np.sin(af * 0.1 + i * 0.3)
-                h = max(6, int(5 + 15 * (0.5 + 0.5 * abs(wave))))
-                rgba = UIColors.PURPLE
-            elif st == "follow_up":
-                wave = np.sin(af * 0.12 + i * 0.4)
-                h = max(6, int(8 + al * 30 * (0.5 + 0.5 * abs(wave))))
-                rgba = UIColors.ORANGE
-            else:
-                pulse = 0.3 + 0.7 * wc
-                h = max(4, int(3 + 8 * pulse * abs(np.sin(af * 0.05 + i * 0.2))))
-                rgba = UIColors.ACCENT_DIM
-
-            bx = start_x + i * spacing
-            by = cy - h / 2
-            with self.canvas.after:
-                Color(*rgba)
-                RoundedRectangle(pos=(bx, by), size=(bar_w, h), radius=[3,])
 
 
 class VidatronRoot(BoxLayout):
     engine = ObjectProperty(None, allownone=True)
 
-    bg_color = ListProperty([15 / 255, 15 / 255, 25 / 255, 1])
-    accent_color = ListProperty([0, 1, 200 / 255, 1])
-    pink_color = ListProperty([1, 50 / 255, 150 / 255, 1])
-    text_color = ListProperty([240 / 255, 240 / 255, 250 / 255, 1])
-    text_dim_color = ListProperty([140 / 255, 145 / 255, 165 / 255, 1])
-    user_panel_bg = ListProperty([25 / 255, 28 / 255, 40 / 255, 1])
-    bot_panel_bg = ListProperty([25 / 255, 28 / 255, 40 / 255, 1])
-    badge_bg_color = ListProperty([25 / 255, 28 / 255, 40 / 255, 1])
-    badge_color = ListProperty([0, 150 / 255, 120 / 255, 1])
-    badge_text = StringProperty("")
+    bg_color = ListProperty([*UIColors.BG])
+    blob_color_a = ListProperty([*UIColors.BG_BLOB_A])
+    blob_color_b = ListProperty([*UIColors.BG_BLOB_B])
     face_source = StringProperty("")
-    user_panel_text = StringProperty("")
-    bot_panel_text = StringProperty("")
-    status_message = StringProperty("")
-    hint_text = StringProperty("")
-    show_wake_meter = BooleanProperty(False)
-    wake_meter_label = StringProperty("")
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        Clock.schedule_interval(self._refresh_ui, 1 / 30.0)
-
-    def on_engine(self, _inst, eng):
-        if eng:
-            eng.fbind("wake_word_confidence", self._sync_wake_bar)
-
-    def _sync_wake_bar(self, *args):
-        if self.engine:
-            self.ids.wake_pb.value = min(1.0, float(self.engine.wake_word_confidence))
+        Clock.schedule_interval(self._refresh_ui, 1 / 15.0)
 
     def _refresh_ui(self, _dt):
         eng = self.engine
         if not eng:
             return
-        if eng.playback_active:
-            # Keep only essential status updates while speaker has exclusive mode.
-            self.status_message = eng.status_message
-            self.hint_text = eng.compute_hint_text()
-            return
-        self.hint_text = eng.compute_hint_text()
-        self.status_message = eng.status_message
-        self.user_panel_text = eng._format_user_panel()
-        self.bot_panel_text = eng._format_bot_panel()
-        self.badge_text = eng.badge_text
-        self.badge_color = eng.badge_color_rgba
         self.face_source = eng.face_source
-        self.show_wake_meter = eng.display_state == "waiting"
-        self.wake_meter_label = eng.wake_meter_label
-        if eng.display_state == "waiting":
-            self.user_panel_bg = [*UIColors.PANEL[:3], 1]
+        reminding = bool(getattr(eng, "reminder_show", False))
+        has_face = bool(
+            getattr(eng, "face_source", "") and Path(str(eng.face_source)).exists()
+        )
+        if getattr(eng, "face_use_vector", False):
+            has_face = False
+        if hasattr(self.ids, "reminder_stick"):
+            rs = self.ids.reminder_stick
+            if reminding:
+                rs.action = getattr(eng, "reminder_stick_action", "wave") or "wave"
+                rs.accent = list(getattr(eng, "reminder_stick_accent", [0.1, 0.9, 1.0, 1.0]))
+                rs.opacity = 1.0
         else:
-            self.user_panel_bg = [*UIColors.PANEL[:3], 1]
+                rs.opacity = 0.0
+        if hasattr(self.ids, "face_img"):
+            self.ids.face_img.opacity = 0.0 if reminding else (1.0 if has_face else 0.0)
+        if hasattr(self.ids, "mascot"):
+            self.ids.mascot.opacity = 0.0 if reminding or has_face else 1.0
+        try:
+            cm = _get_ui_config_manager()
+            eng.selected_eyes = normalize_eye_choice(cm.get("face_customization.selected_eyes"))
+            eng.selected_mouth = normalize_mouth_choice(cm.get("face_customization.selected_mouth"))
+            bg = cm.get("default_colors.background", [0.38, 0.58, 0.88, 1.0])
+            prim = cm.get("default_colors.primary", [0.28, 0.55, 0.82, 1.0])
+            if isinstance(bg, list) and len(bg) >= 3:
+                self.bg_color = [float(bg[0]), float(bg[1]), float(bg[2]), float(bg[3] if len(bg) > 3 else 1.0)]
+            if isinstance(prim, list) and len(prim) >= 3:
+                pr = [float(prim[0]), float(prim[1]), float(prim[2])]
+                self.blob_color_a = [
+                    pr[0] * 0.55 + 0.2,
+                    pr[1] * 0.55 + 0.2,
+                    pr[2] * 0.55 + 0.2,
+                    0.38,
+                ]
+                self.blob_color_b = [
+                    pr[0] * 0.35 + 0.08,
+                    pr[1] * 0.35 + 0.08,
+                    pr[2] * 0.35 + 0.15,
+                    0.42,
+                ]
+            Window.clearcolor = (self.bg_color[0], self.bg_color[1], self.bg_color[2], 1.0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
 
 
 class VidatronEngine(EventDispatcher):
-    status_message = StringProperty("Say 'Hey Veedatron' to activate...")
+    status_message = StringProperty("Say Hey Veedatron when you're ready…")
     wake_word_confidence = NumericProperty(0.0)
     audio_level = NumericProperty(0.0)
     animation_frame = NumericProperty(0)
     display_state = StringProperty("waiting")
     badge_text = StringProperty("")
-    badge_color_rgba = ListProperty([0, 150 / 255, 120 / 255, 1])
+    badge_color_rgba = ListProperty([*UIColors.ACCENT_DIM])
     face_source = StringProperty("")
     wake_meter_label = StringProperty("Wake word: 0%")
     playback_active = BooleanProperty(False)
+    selected_eyes = StringProperty("Round")
+    selected_mouth = StringProperty("Neutral")
+    reminder_show = BooleanProperty(False)
+    reminder_title = StringProperty("")
+    reminder_detail = StringProperty("")
+    reminder_caption = StringProperty("")
+    reminder_stick_action = StringProperty("wave")
+    reminder_stick_accent = ListProperty([0.10, 0.90, 1.00, 1.0])
 
     def __init__(self):
         super().__init__()
+        self._reminder_return_screen: str | None = None
+        self._reminder_clear_ev = None
         # Set VIDATRON_MANUAL_TERMINAL=1 to disable mic and use terminal typing instead.
         self.manual_terminal_mode = os.environ.get("VIDATRON_MANUAL_TERMINAL", "").strip().lower() in (
             "1",
@@ -447,8 +890,9 @@ class VidatronEngine(EventDispatcher):
         self.speaker_aplay_device = self._resolve_speaker_aplay()
         self._wav_player = SubprocessWavPlayer()
 
-        self._face_paths = self._build_face_paths()
         self.config = AppConfig.load()
+        self.face_use_vector = bool(getattr(self.config, "face_use_vector", False))
+        self._face_paths = self._build_face_paths()
         self.chat_history = ChatHistoryStore(
             self.config.chat_history_path,
             max_stored_messages=self.config.chat_history_max_stored,
@@ -560,6 +1004,55 @@ class VidatronEngine(EventDispatcher):
         self.stream: sd.InputStream | None = None
         self._sync_ui_state()
         print("✓ UI Ready!")
+
+    def fire_reminder_display(self, reminder: dict, return_screen: str | None = None) -> None:
+        """Show full-screen stick-figure reminder animation on the voice UI (auto-dismiss)."""
+        self._reminder_return_screen = return_screen
+        self.reminder_stick_action = _reminder_stick_action(reminder)
+        accent = reminder.get("accent")
+        if isinstance(accent, list) and len(accent) >= 3:
+            self.reminder_stick_accent = [
+                float(accent[0]),
+                float(accent[1]),
+                float(accent[2]),
+                float(accent[3] if len(accent) > 3 else 1.0),
+            ]
+        else:
+            try:
+                cm = _get_ui_config_manager()
+                prim = cm.get("default_colors.primary", [0.10, 0.90, 1.00, 1.0])
+                if isinstance(prim, list) and len(prim) >= 3:
+                    self.reminder_stick_accent = [
+                        float(prim[0]),
+                        float(prim[1]),
+                        float(prim[2]),
+                        float(prim[3] if len(prim) > 3 else 1.0),
+                    ]
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+        title = (reminder.get("text") or "Reminder").strip() or "Reminder"
+        self.reminder_title = f"[b]{title}[/b]"
+        self.reminder_caption = f"Reminder to {title.lower()}" if title else "Reminder"
+        desc = (reminder.get("description") or "").strip()
+        self.reminder_detail = desc if desc else ""
+        self.reminder_show = True
+        if self._reminder_clear_ev is not None:
+            self._reminder_clear_ev.cancel()
+        self._reminder_clear_ev = Clock.schedule_once(self._clear_reminder_display, 60.0)
+
+    def _clear_reminder_display(self, _dt: float) -> None:
+        self.reminder_show = False
+        self.reminder_title = ""
+        self.reminder_detail = ""
+        self.reminder_caption = ""
+        self._reminder_clear_ev = None
+        rs = self._reminder_return_screen
+        self._reminder_return_screen = None
+        if rs and rs != "voice":
+            app = App.get_running_app()
+            sm = getattr(app, "root", None) if app else None
+            if sm is not None and hasattr(sm, "has_screen") and sm.has_screen(rs):
+                sm.current = rs
 
     def _ollama_messages_cloud_fallback(self, user_text: str) -> list:
         """Ollama path when Groq is unavailable: system + saved chat + current user."""
@@ -730,17 +1223,27 @@ class VidatronEngine(EventDispatcher):
             print(f"  Manual prompt error: {e}")
 
     def _build_face_paths(self) -> dict:
-        face_dir = PROJECT_ROOT / "assets" / "face"
-        mapping = {
+        base = Path(self.config.assets_path)
+        theme = (getattr(self.config, "face_theme", "") or "").strip()
+        if theme:
+            base = base / theme
+        custom = getattr(self.config, "face_images", None) or {}
+        if not isinstance(custom, dict):
+            custom = {}
+        default_names = {
             State.WAITING: "happy.png",
             State.LISTENING: "thinking.png",
             State.THINKING: "thinking.png",
             State.SPEAKING: "happy_eye_glistening.png",
             State.FOLLOW_UP: "happy.png",
         }
-        out = {}
-        for st, fn in mapping.items():
-            p = face_dir / fn
+        out: dict[State, str] = {}
+        for st, default_fn in default_names.items():
+            key = st.value
+            fn = custom.get(key) or custom.get(st.name) or default_fn
+            if not isinstance(fn, str):
+                fn = default_fn
+            p = base / fn
             out[st] = str(p) if p.exists() else ""
         return out
 
@@ -1090,11 +1593,11 @@ class VidatronEngine(EventDispatcher):
 
     def _sync_ui_state(self):
         cfg = {
-            State.WAITING: ("Waiting for 'Hey Veedatron'", UIColors.ACCENT_DIM),
-            State.LISTENING: ("Listening... (speak now!)", UIColors.ERROR),
-            State.THINKING: ("Thinking...", UIColors.PURPLE),
-            State.SPEAKING: ("Speaking...", UIColors.SUCCESS),
-            State.FOLLOW_UP: ("Listening for follow-up...", UIColors.ORANGE),
+            State.WAITING: ("Say Hey Veedatron when you're ready", UIColors.ACCENT_DIM),
+            State.LISTENING: ("Listening — take your time", UIColors.ERROR),
+            State.THINKING: ("Thinking it over...", UIColors.PURPLE),
+            State.SPEAKING: ("Talking to you...", UIColors.SUCCESS),
+            State.FOLLOW_UP: ("Go ahead — follow-up?", UIColors.ORANGE),
         }
         text, col = cfg.get(self.state, ("", UIColors.TEXT_DIM))
         self.badge_text = text
@@ -1108,7 +1611,7 @@ class VidatronEngine(EventDispatcher):
         if self.state == State.LISTENING:
             dots = "." * (1 + (int(self.animation_frame) // 15) % 3)
             return f"Recording{dots}"
-        return "(waiting for speech...)"
+        return "…"
 
     def _format_bot_panel(self) -> str:
         if self.bot_response:
@@ -1116,19 +1619,19 @@ class VidatronEngine(EventDispatcher):
         if self.state == State.THINKING:
             dots = "." * (1 + (int(self.animation_frame) // 10) % 3)
             return f"Generating response{dots}"
-        return "(waiting for response...)"
+        return "…"
 
     def compute_hint_text(self) -> str:
         if self.manual_terminal_mode:
-            return "Mic disabled. Type prompts in terminal (You> ...) • Press Esc to exit"
+            return "Type at You> in the terminal • Esc to exit"
         if self.state == State.WAITING:
-            return "Say 'Hey Veedatron' or type at You> in the terminal • Press Esc to exit"
+            return "Say Hey Veedatron, or type at You> • Esc to exit"
         if self.state == State.LISTENING:
-            return "Speak now! Will auto-detect when you stop talking"
+            return "Speak naturally — I'll listen until you pause"
         if self.state == State.FOLLOW_UP:
             remaining = max(0, self.follow_up_timeout - (time.time() - self.follow_up_start_time))
-            return f"Ask a follow-up or wait {remaining:.0f}s to exit conversation"
-        return "Press Esc to exit"
+            return f"Ask another question, or wait {remaining:.0f}s to return to idle"
+        return "Esc to exit"
 
     def _stop_playback(self):
         try:
@@ -1660,23 +2163,55 @@ class VidatronEngine(EventDispatcher):
             self._main_thread(err)
 
 
+class VoiceScreen(Screen):
+    """Main voice assistant view (wrapped for :class:`ScreenManager`)."""
+
+    def __init__(self, engine: VidatronEngine, **kwargs):
+        super().__init__(**kwargs)
+        self.add_widget(VidatronRoot(engine=engine))
+
+
 class VidatronApp(App):
-    title = "Vidatron - Say 'Hey Veedatron'"
+    title = "Vidatron"
 
     def __init__(self, engine: VidatronEngine, **kwargs):
         super().__init__(**kwargs)
         self.engine = engine
         self._keyboard_cb = None
+        self._touch_ud_token: str = "vidatron_swipe"
 
     def build(self):
-        root = VidatronRoot(engine=self.engine)
-        self._root = root
-        return root
+        sm = ScreenManager(transition=SlideTransition())
+        sm.add_widget(VoiceScreen(name="voice", engine=self.engine))
+        ui_dir = Path(__file__).resolve().parent.parent / "ui"
+        if str(ui_dir) not in sys.path:
+            sys.path.append(str(ui_dir))
+        from screens import (  # noqa: WPS433 — loaded after ui/ on path
+            SetupColorsScreen,
+            SetupFaceScreen,
+            RemindersScreen,
+        )
+
+        sm.add_widget(SetupFaceScreen(name="setup_face"))
+        sm.add_widget(SetupColorsScreen(name="setup_colors"))
+        sm.add_widget(RemindersScreen(name="reminders"))
+        sm.current = "voice"
+        self._screen_manager = sm
+        return sm
 
     def on_start(self):
+        Window.clearcolor = (*UIColors.BG[:3], 1)
         eng = self.engine
+        try:
+            cm = _get_ui_config_manager()
+            cm.ensure_default_reminders()
+            _voice_seed_interval_last_fired(cm)
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            print(f"  Reminder config warmup: {e}")
         self._keyboard_cb = partial(_on_keyboard, eng)
         Window.bind(on_keyboard=self._keyboard_cb)
+        Window.bind(on_touch_down=self._on_window_touch_down, on_touch_up=self._on_window_touch_up)
+        Clock.schedule_interval(voice_reminder_tick, 1.0)
         # Do not pre-open speaker stream here — it holds plughw open and breaks aplay.
         if not eng.manual_terminal_mode:
             eng._open_mic_stream()
@@ -1686,10 +2221,35 @@ class VidatronApp(App):
             print("  Audio stream disabled (manual terminal mode)")
         eng.start_terminal_prompt_loop()
 
+    def _on_window_touch_down(self, window, touch):
+        # touch.profile is a list of capability names (e.g. ['pos', 'button']), not a dict.
+        if "button" in touch.profile:
+            btn = getattr(touch, "button", None)
+            if btn and str(btn).startswith("scroll"):
+                return False
+        touch.ud[self._touch_ud_token] = (touch.x, touch.y)
+        return False
+
+    def _on_window_touch_up(self, window, touch):
+        start = touch.ud.pop(self._touch_ud_token, None)
+        if start is None:
+            return False
+        sm = self.root
+        if not isinstance(sm, ScreenManager) or sm.current != "voice":
+            return False
+        dx = touch.x - start[0]
+        dy = touch.y - start[1]
+        if abs(dx) >= dp(72) and abs(dx) > abs(dy) * 1.25:
+            sm.current = "setup_face"
+            return False
+        return False
+
     def on_stop(self):
         if self._keyboard_cb is not None:
             Window.unbind(on_keyboard=self._keyboard_cb)
             self._keyboard_cb = None
+        Window.unbind(on_touch_down=self._on_window_touch_down, on_touch_up=self._on_window_touch_up)
+        Clock.unschedule(voice_reminder_tick)
         self.engine.running = False
         if self.engine.stream:
             self.engine.stream.stop()
@@ -1735,6 +2295,7 @@ def main():
         print("  • Type prompts in this terminal at You> (same as speaking after wake)")
         print("  • Space = simulate wake word while waiting")
     print("  • Press Esc to exit")
+    print("  • Swipe horizontally on the window to customize face, colours & reminders")
     print("=" * 55 + "\n")
 
     engine = VidatronEngine()

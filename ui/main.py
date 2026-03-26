@@ -12,7 +12,6 @@ from config import config_manager
 from screens import (
     WelcomeScreen,
     SetupFaceScreen,
-    SetupFontScreen,
     SetupColorsScreen,
     Homescreen,
     SettingsScreen,
@@ -39,7 +38,6 @@ class PreviewApp(App):
         # Add all screens
         sm.add_widget(WelcomeScreen(name="welcome"))
         sm.add_widget(SetupFaceScreen(name="setup_face"))
-        sm.add_widget(SetupFontScreen(name="setup_font"))
         sm.add_widget(SetupColorsScreen(name="setup_colors"))
         sm.add_widget(Homescreen(name="homescreen"))
         sm.add_widget(SettingsScreen(name="settings"))
