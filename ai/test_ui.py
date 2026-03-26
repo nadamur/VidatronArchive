@@ -183,18 +183,22 @@ def _voice_normalize_trigger_time(time_str: str) -> str:
 
 
 def _reminder_stick_action(reminder: dict) -> str:
-    """Map a reminder to a stick-figure animation id (drink | stretch | wave)."""
+    """Map a reminder to a stick-figure animation id."""
     a = (reminder.get("action") or "").strip().lower()
-    if a in ("drink", "stretch", "wave"):
+    if a in ("drink", "stretch", "walk", "think", "wave"):
         return a
     t = (reminder.get("text") or "").lower()
     ip = (reminder.get("icon_path") or "").lower()
     if "drink" in t or "water" in t or "hydrat" in t or "drink_water" in ip:
         return "drink"
+    if any(k in t for k in ("grateful", "gratitude", "reflect", "thankful", "think about")):
+        return "think"
+    if any(k in t for k in ("short break", "walk", "stroll", "step away")):
+        return "walk"
     if (
         "stretch" in t
         or "yoga" in t
-        or any(k in t for k in ("stand", "break", "exercise", "walk", "jog"))
+        or any(k in t for k in ("stand", "break", "exercise", "jog"))
         or "get up" in t
     ):
         return "stretch"
@@ -1008,8 +1012,55 @@ class VidatronEngine(EventDispatcher):
     def fire_reminder_display(self, reminder: dict, return_screen: str | None = None) -> None:
         """Show full-screen stick-figure reminder animation on the voice UI (auto-dismiss)."""
         self._reminder_return_screen = return_screen
+
+        # If the reminder provides `text_variants`, rotate caption text so it isn't repetitive.
+        # We persist the chosen index in ui/vidatron_config.json so the UI and speech stay correlated.
+        tv = reminder.get("text_variants")
+        rid = reminder.get("id")
+        if isinstance(tv, list) and len(tv) > 0 and rid:
+            try:
+                cm = _get_ui_config_manager()
+                idx_map = cm.get("reminder_text_variant_index", {})
+                if not isinstance(idx_map, dict):
+                    idx_map = {}
+                cur_idx = idx_map.get(rid, -1)
+                next_idx = (int(cur_idx) + 1) % len(tv)
+                idx_map[rid] = next_idx
+                cm.set("reminder_text_variant_index", idx_map)
+
+                chosen = str(tv[next_idx]).strip() or str(reminder.get("text") or "Reminder")
+                reminder = dict(reminder)
+                reminder["text"] = chosen
+            except Exception as e:
+                print(f"  Reminder variant selection failed: {e}")
+
         self.reminder_stick_action = _reminder_stick_action(reminder)
-        accent = reminder.get("accent")
+        # Force deterministic reminder accent colors for the built-in habits.
+        # This keeps each reminder visually distinct even if old saved reminders
+        # were created with different `accent` values.
+        rem_text = (reminder.get("text") or "").strip().lower()
+        act_hint = (reminder.get("action") or "").strip().lower()
+        if (
+            ("water" in rem_text)
+            or ("hydration" in rem_text)
+            or (act_hint == "drink")
+        ):
+            accent = [0.10, 0.65, 1.00, 1.0]
+        elif "posture" in rem_text or (act_hint == "stretch" and "posture" in rem_text):
+            accent = [0.20, 0.85, 0.40, 1.0]
+        elif act_hint == "walk" or ("short" in rem_text and "break" in rem_text):
+            accent = [0.68, 0.45, 1.00, 1.0]
+        elif (
+            "grateful" in rem_text
+            or "gratitude" in rem_text
+            or "thank" in rem_text
+            or act_hint == "think"
+        ):
+            accent = [1.00, 0.41, 0.71, 1.0]
+        elif act_hint == "stretch" or "stretch" in rem_text or "get up" in rem_text:
+            accent = [1.00, 0.82, 0.20, 1.0]
+        else:
+            accent = reminder.get("accent")
         if isinstance(accent, list) and len(accent) >= 3:
             self.reminder_stick_accent = [
                 float(accent[0]),
@@ -1031,14 +1082,63 @@ class VidatronEngine(EventDispatcher):
             except (OSError, ValueError, TypeError, AttributeError):
                 pass
         title = (reminder.get("text") or "Reminder").strip() or "Reminder"
-        self.reminder_title = f"[b]{title}[/b]"
-        self.reminder_caption = f"Reminder to {title.lower()}" if title else "Reminder"
+        friendly_caption = f"Friendly reminder to {title.lower()}" if title else "Friendly reminder"
+        self.reminder_title = f"[b]{friendly_caption}[/b]"
+        self.reminder_caption = friendly_caption
+
         desc = (reminder.get("description") or "").strip()
+        if desc and title and desc.lower() == title.lower():
+            t = title.lower()
+            if "drink" in t or "water" in t or "hydration" in t:
+                desc = "Stay hydrated!"
+            elif "posture" in t:
+                desc = "Sit tall and relax your shoulders."
+            elif "short break" in t or ("break" in t and "short" in t):
+                desc = "Stand up, breathe, and reset."
+            elif "grateful" in t or "gratitude" in t or "think about" in t or "thank" in t:
+                desc = "Name one thing you're grateful for."
+            elif "stretch" in t or "get up" in t or "yoga" in t:
+                desc = "Relax your body, move gently."
+            else:
+                desc = "Take a brief pause and focus on your habit."
         self.reminder_detail = desc if desc else ""
         self.reminder_show = True
         if self._reminder_clear_ev is not None:
             self._reminder_clear_ev.cancel()
         self._reminder_clear_ev = Clock.schedule_once(self._clear_reminder_display, 60.0)
+
+        # Optional audible reminder (respects ui/config.py voice_reminders_enabled).
+        try:
+            cm = _get_ui_config_manager()
+            voice_enabled = bool(cm.get("voice_reminders_enabled", True))
+        except Exception:
+            voice_enabled = True
+
+        if voice_enabled and self.state == State.WAITING:
+            speak_text = friendly_caption
+            my_request_id = self.current_request_id
+
+            def _speak():
+                wav_file = None
+                try:
+                    wav_file = self.tts.synthesize(speak_text)
+                    self._play_wav_blocking(wav_file, cancel_id=my_request_id)
+                except Exception as exc:
+                    print(f"  Reminder speech error: {exc}")
+                finally:
+                    if wav_file:
+                        try:
+                            os.unlink(wav_file)
+                        except OSError:
+                            pass
+                    # Playback closes mic stream; reopen if we're still waiting for wake word.
+                    try:
+                        if (not self.manual_terminal_mode) and self.state == State.WAITING:
+                            self._open_mic_stream()
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_speak, daemon=True).start()
 
     def _clear_reminder_display(self, _dt: float) -> None:
         self.reminder_show = False
@@ -1803,6 +1903,20 @@ class VidatronEngine(EventDispatcher):
             return
         if self.wake_word_model is not None:
             self.wake_word_model.reset()
+        # Wake word should always bring UI back to the face (voice screen),
+        # dismissing any reminder overlay that may still be visible.
+        if self._reminder_clear_ev is not None:
+            self._reminder_clear_ev.cancel()
+            self._reminder_clear_ev = None
+        self.reminder_show = False
+        self.reminder_title = ""
+        self.reminder_detail = ""
+        self.reminder_caption = ""
+        self._reminder_return_screen = None
+        app = App.get_running_app()
+        sm = getattr(app, "root", None) if app else None
+        if sm is not None and hasattr(sm, "has_screen") and sm.has_screen("voice"):
+            sm.current = "voice"
         self.user_text = "Hey Veedatron"
         self.bot_response = ""
         self._start_listening_mode()

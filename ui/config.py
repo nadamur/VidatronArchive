@@ -67,6 +67,7 @@ class ConfigManager:
                 "primary": [0.10, 0.90, 1.00, 1.0],    # default accent color
                 "background": [0.02, 0.02, 0.04, 1.0]   # default background color
             },
+            "voice_reminders_enabled": True,        # audibly speak reminders on trigger
             "reminders": [],                 # list of reminder objects
             "last_fired": {},                # reminder_id -> "YYYY-MM-DD HH:MM" for trigger tracking
             "default_reminders_added": False  # track if default reminders have been added
@@ -123,66 +124,214 @@ class ConfigManager:
         self.save_config()
     
     def ensure_default_reminders(self):
-        """Add default reminders if they haven't been added yet, or update intervals if they exist."""
+        """
+        Seed missing built-in reminders without clobbering user settings.
+
+        What we do:
+        - If a built-in reminder is missing, add it with default wording.
+        - If a built-in reminder exists, only migrate wording/action/icon fields.
+          We DO NOT overwrite interval minutes / trigger time / active state, so
+          user changes persist across restarts.
+        """
         reminders = self.config.get("reminders", [])
-        
-        # Check if default reminders already exist
-        drink_water_exists = False
-        stretch_exists = False
-        for reminder in reminders:
-            if reminder.get("text") == "Drink water":
-                drink_water_exists = True
-                # Update interval to 1 minute for testing
-                reminder["interval_minutes"] = 1
-            elif reminder.get("text") == "Get up and stretch":
-                stretch_exists = True
-                # Update interval to 2 minutes for testing
-                reminder["interval_minutes"] = 2
-        
-        # Add missing default reminders
+        if not isinstance(reminders, list):
+            reminders = []
+        # Only seed missing built-ins once. After first-time setup, user deletions
+        # should persist across restarts (do not recreate deleted reminders).
+        allow_add_missing = not bool(self.config.get("default_reminders_added", False))
+
+        def _norm(s):
+            return (s or "").strip().lower()
+
+        def _is_drink(r):
+            t = _norm(r.get("text"))
+            a = _norm(r.get("action"))
+            ip = _norm(r.get("icon_path"))
+            return (
+                a == "drink"
+                or "drink" in t
+                or "water" in t
+                or "hydration" in t
+                or ip.endswith("drink_water.png")
+            )
+
+        def _is_stretch(r):
+            t = _norm(r.get("text"))
+            a = _norm(r.get("action"))
+            ip = _norm(r.get("icon_path"))
+            return (
+                (a == "stretch" and ip.endswith("stretch.png"))
+                or "stretch" in t
+                or "get up" in t
+                or "yoga" in t
+            )
+
+        def _is_posture(r):
+            t = _norm(r.get("text"))
+            a = _norm(r.get("action"))
+            ip = _norm(r.get("icon_path"))
+            return (a == "stretch" and (not ip or ip in ("none", "")) and "posture" in t)
+
+        def _is_short_break(r):
+            t = _norm(r.get("text"))
+            a = _norm(r.get("action"))
+            return a == "walk" or ("short" in t and "break" in t)
+
+        def _is_gratitude(r):
+            t = _norm(r.get("text"))
+            a = _norm(r.get("action"))
+            return a == "think" or "grateful" in t or "gratitude" in t or "thank" in t
+
+        # Target wording (fix punctuation/spelling)
+        drink_default = {
+            "text": "Drink water",
+            "action": "drink",
+            "icon": None,
+            "icon_path": "assets/icons/drink_water.png",
+            "face_expression": None,
+            "trigger_type": "Every X Minutes",
+            "trigger_time": None,
+            "interval_minutes": 5,
+            "repeat_settings": "daily",
+            "is_active": True,
+            "accent": [0.10, 0.65, 1.00, 1.0],
+            "mood": "happy",
+            "description": "Stay hydrated!",
+        }
+
+        stretch_default = {
+            "text": "Get up and stretch",
+            "action": "stretch",
+            "icon": None,
+            "icon_path": "assets/icons/stretch.png",
+            "face_expression": None,
+            "trigger_type": "Every X Minutes",
+            "trigger_time": None,
+            "interval_minutes": 10,
+            "repeat_settings": "daily",
+            "is_active": True,
+            "accent": [1.00, 0.82, 0.20, 1.0],
+            "mood": "calm",
+            "description": "Take a break and move around.",
+        }
+
+        posture_default = {
+            "text": "Fix your posture",
+            "action": "stretch",
+            "icon": None,
+            "icon_path": None,
+            "face_expression": None,
+            "trigger_type": "Every X Minutes",
+            "trigger_time": None,
+            "interval_minutes": 15,
+            "repeat_settings": "daily",
+            "is_active": True,
+            "accent": [0.20, 0.85, 0.40, 1.0],
+            "mood": "calm",
+            "description": "Sit tall and relax your shoulders.",
+        }
+
+        short_break_default = {
+            "text": "Take a short break",
+            "action": "walk",
+            "icon": None,
+            "icon_path": None,
+            "face_expression": None,
+            "trigger_type": "Every X Minutes",
+            "trigger_time": None,
+            "interval_minutes": 20,
+            "repeat_settings": "daily",
+            "is_active": True,
+            "accent": [0.68, 0.45, 1.00, 1.0],
+            "mood": "happy",
+            "description": "Stand up, breathe, and reset.",
+        }
+
+        gratitude_default = {
+            "text": "Think about something you're grateful for",
+            "action": "think",
+            "icon": None,
+            "icon_path": None,
+            "face_expression": None,
+            "trigger_type": "Every X Minutes",
+            "trigger_time": None,
+            "interval_minutes": 30,
+            "repeat_settings": "daily",
+            "is_active": True,
+            "accent": [1.00, 0.41, 0.71, 1.0],
+            "mood": "happy",
+            "description": "Name one thing you're grateful for.",
+        }
+
+        # Track which built-ins exist.
+        found = {
+            "drink": False,
+            "stretch": False,
+            "posture": False,
+            "short_break": False,
+            "gratitude": False,
+        }
+
+        def _migrate_existing(existing: dict, target: dict) -> bool:
+            """Migrate wording/action/icon fields. Returns True if anything changed."""
+            changed = False
+            for k in (
+                "text",
+                "action",
+                "icon",
+                "icon_path",
+                "mood",
+                "accent",
+                "description",
+                "face_expression",
+            ):
+                if existing.get(k) != target.get(k):
+                    existing[k] = target.get(k)
+                    changed = True
+            return changed
+
+        changed_any = False
+        for r in reminders:
+            if not isinstance(r, dict):
+                continue
+
+            if _is_drink(r) and not found["drink"]:
+                found["drink"] = True
+                changed_any = _migrate_existing(r, drink_default) or changed_any
+            elif _is_posture(r) and not found["posture"]:
+                found["posture"] = True
+                changed_any = _migrate_existing(r, posture_default) or changed_any
+            elif _is_short_break(r) and not found["short_break"]:
+                found["short_break"] = True
+                changed_any = _migrate_existing(r, short_break_default) or changed_any
+            elif _is_gratitude(r) and not found["gratitude"]:
+                found["gratitude"] = True
+                changed_any = _migrate_existing(r, gratitude_default) or changed_any
+            elif _is_stretch(r) and not found["stretch"]:
+                found["stretch"] = True
+                changed_any = _migrate_existing(r, stretch_default) or changed_any
+
+        # Add any missing built-ins (first-time setup only).
         default_reminders = []
-        if not drink_water_exists:
-            default_reminders.append({
-                "id": str(uuid.uuid4()),
-                "text": "Drink water",
-                "action": "drink",  # Kivy-drawn stick figure (no image file needed)
-                "icon": None,
-                "icon_path": "assets/icons/drink_water.png",  # Optional fallback if file exists
-                "face_expression": None,
-                "trigger_type": "Every X Minutes",
-                "trigger_time": None,
-                "interval_minutes": 1,  # Every 1 minute (for testing)
-                "repeat_settings": "daily",
-                "is_active": True,
-                "accent": [0.10, 0.90, 1.00, 1.0],  # Blue
-                "mood": "happy",
-                "description": "Stay hydrated!"
-            })
-        if not stretch_exists:
-            default_reminders.append({
-                "id": str(uuid.uuid4()),
-                "text": "Get up and stretch",
-                "action": "stretch",  # Kivy-drawn stick figure (no image file needed)
-                "icon": None,
-                "icon_path": "assets/icons/stretch.png",  # Optional fallback if file exists
-                "face_expression": None,
-                "trigger_type": "Every X Minutes",
-                "trigger_time": None,
-                "interval_minutes": 2,  # Every 2 minutes (for testing)
-                "repeat_settings": "daily",
-                "is_active": True,
-                "accent": [0.15, 1.00, 0.55, 1.0],  # Green
-                "mood": "calm",
-                "description": "Take a break and move around"
-            })
-        
+        if allow_add_missing and not found["drink"]:
+            default_reminders.append({"id": str(uuid.uuid4()), **drink_default})
+        if allow_add_missing and not found["stretch"]:
+            default_reminders.append({"id": str(uuid.uuid4()), **stretch_default})
+        if allow_add_missing and not found["posture"]:
+            default_reminders.append({"id": str(uuid.uuid4()), **posture_default})
+        if allow_add_missing and not found["short_break"]:
+            default_reminders.append({"id": str(uuid.uuid4()), **short_break_default})
+        if allow_add_missing and not found["gratitude"]:
+            default_reminders.append({"id": str(uuid.uuid4()), **gratitude_default})
+
         if default_reminders:
             reminders.extend(default_reminders)
             self.config["reminders"] = reminders
             self.config["default_reminders_added"] = True
             self.save_config()
-        elif drink_water_exists or stretch_exists:
-            # Updated existing reminders - save the changes
+            return
+
+        if changed_any:
             self.config["reminders"] = reminders
             self.save_config()
 

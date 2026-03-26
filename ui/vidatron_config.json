@@ -1,8 +1,8 @@
 {
   "first_time_setup_complete": true,
   "face_customization": {
-    "selected_eyes": "Round",
-    "selected_mouth": "Small"
+    "selected_eyes": "Wide",
+    "selected_mouth": "Wide"
   },
   "font_settings": {
     "style": "Roboto",
@@ -10,65 +10,102 @@
   },
   "default_colors": {
     "primary": [
-      0.1,
-      0.9,
       1.0,
+      0.41,
+      0.71,
       1.0
     ],
     "background": [
-      0.38,
+      0.88,
       0.55,
-      0.82,
+      0.7,
       1.0
     ]
   },
+  "voice_reminders_enabled": true,
   "reminders": [
     {
-      "id": "b98e8401-6b74-490f-8e18-8864c84b7b68",
-      "text": "Drink water",
+      "id": "2b231974-465f-48db-9ae0-1392f10acf82",
+      "text": "Think about something you're grateful for",
       "icon": null,
-      "icon_path": "assets/icons/drink_water.png",
+      "icon_path": null,
+      "action": "think",
       "face_expression": null,
       "trigger_type": "Every X Minutes",
       "trigger_time": null,
-      "interval_minutes": 1,
+      "interval_minutes": 5,
       "repeat_settings": "daily",
-      "is_active": false,
+      "is_active": true,
       "accent": [
-        0.1,
-        0.9,
+        1.0,
+        0.41,
+        0.71,
+        1.0
+      ],
+      "mood": "happy",
+      "description": "Name one thing you're grateful for."
+    },
+    {
+      "id": "dcc1bf01-c397-4488-a1ad-898d0c316d97",
+      "text": "Fix your posture",
+      "action": "stretch",
+      "icon": null,
+      "icon_path": null,
+      "face_expression": null,
+      "trigger_type": "Every X Minutes",
+      "trigger_time": null,
+      "interval_minutes": 15,
+      "repeat_settings": "daily",
+      "is_active": true,
+      "accent": [
+        0.2,
+        0.85,
+        0.4,
+        1.0
+      ],
+      "mood": "calm",
+      "description": "Sit tall and relax your shoulders."
+    },
+    {
+      "id": "c9e8e5f8-684e-47a6-b536-2c99af5f3bab",
+      "text": "Take a short break",
+      "action": "walk",
+      "icon": null,
+      "icon_path": null,
+      "face_expression": null,
+      "trigger_type": "Every X Minutes",
+      "trigger_time": null,
+      "interval_minutes": 20,
+      "repeat_settings": "daily",
+      "is_active": true,
+      "accent": [
+        0.68,
+        0.45,
         1.0,
         1.0
       ],
       "mood": "happy",
-      "description": "Stay hydrated!"
-    },
-    {
-      "id": "0c255a74-5ac3-47c5-a37a-a01fec899dba",
-      "text": "Get up and stretch",
-      "action": "stretch",
-      "icon": null,
-      "icon_path": "assets/icons/stretch.png",
-      "face_expression": null,
-      "trigger_type": "Every X Minutes",
-      "trigger_time": null,
-      "interval_minutes": 2,
-      "repeat_settings": "daily",
-      "is_active": true,
-      "accent": [
-        0.15,
-        1.0,
-        0.55,
-        1.0
-      ],
-      "mood": "calm",
-      "description": "Take a break and move around"
+      "description": "Stand up, breathe, and reset."
     }
   ],
   "last_fired": {
     "b98e8401-6b74-490f-8e18-8864c84b7b68": 1774487681.667699,
-    "be4878f8-63d7-456f-9599-4279cfe71116": 1774487832.338094,
-    "0c255a74-5ac3-47c5-a37a-a01fec899dba": 1774495219.913602
+    "be4878f8-63d7-456f-9599-4279cfe71116": 1774497947.655219,
+    "8d6f1a1f-2a2e-4b8f-a4d3-9d1e9a0a0e1b": 1774498848.686821,
+    "f4a5d6d2-1f9c-4c44-a8e7-7d0a7a5b1b2e": 1774498909.679291,
+    "c2b4c7e1-9d6f-4f3e-9f2a-3b4c5d6e7f80": 1774498669.570303,
+    "9bffb87f-e3ab-40ec-bc12-076eabc5d240": 1774499737.897477,
+    "33b505b4-eb34-4de5-b9cb-f6dd44e24256": 1774499435.816665,
+    "afccdcef-6ea7-4fa5-85fd-a4b7e93a0a53": 1774499435.816665,
+    "32b4d3be-c557-495c-b365-3155117369ad": 1774501483.890398,
+    "2b231974-465f-48db-9ae0-1392f10acf82": 1774503142.22909,
+    "f879d7a8-c50a-4841-bb80-910cf681cdba": 1774501483.890398,
+    "368457ef-a0eb-408f-9827-9107e18eb312": 1774500847.484743,
+    "09b8ae83-ffbf-4cba-8dfc-8fa4d8f970d1": 1774502048.005673,
+    "d1b6b5b0-1f3b-4e12-8b3f-1a7c5f2c9b11": 1774501483.890398,
+    "a9ad2dea-3faa-4977-a749-7fc3cf1845be": 1774502048.005673,
+    "dcc1bf01-c397-4488-a1ad-898d0c316d97": 1774502841.845708,
+    "c9e8e5f8-684e-47a6-b536-2c99af5f3bab": 1774502841.845708
   },
   "default_reminders_added": true
 }

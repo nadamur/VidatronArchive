@@ -390,7 +390,7 @@ class SetupFaceScreen(Screen):
         
         # Navigation buttons with better styling
         back_btn = Button(
-            text="← Back",
+            text="Back",
             size_hint=(0.2, 0.10),
             pos_hint={"x": 0.1, "y": 0.15},
             background_color=(0.4, 0.4, 0.4, 1.0),
@@ -407,7 +407,7 @@ class SetupFaceScreen(Screen):
         layout.add_widget(back_btn)
         
         next_btn = Button(
-            text="Next →",
+            text="Next",
             size_hint=(0.25, 0.10),
             pos_hint={"x": 0.65, "y": 0.15},
             background_color=(0.2, 0.7, 0.4, 1.0),
@@ -530,13 +530,23 @@ class SetupColorsScreen(Screen):
         )
         layout.add_widget(instructions)
 
-        # One row per theme: sets main screen background + accent (blobs).
+        # One row per theme: center each row horizontally.
+        btn_w = 0.28
+        btn_h = 0.11
+        col_gap = 0.04
+        max_cols = 3
+        total_themes = len(SETUP_COLOR_THEMES)
         for i, (name, color, _bg) in enumerate(SETUP_COLOR_THEMES):
-            row, col = i // 3, i % 3
+            row, col = i // max_cols, i % max_cols
+            row_start_idx = row * max_cols
+            items_in_row = min(max_cols, max(0, total_themes - row_start_idx))
+            row_width = (items_in_row * btn_w) + ((items_in_row - 1) * col_gap)
+            row_start_x = (1.0 - row_width) / 2.0
+            x_pos = row_start_x + col * (btn_w + col_gap)
             btn = Button(
                 text=name,
-                size_hint=(0.28, 0.11),
-                pos_hint={"x": 0.08 + col * 0.32, "y": 0.62 - row * 0.13},
+                size_hint=(btn_w, btn_h),
+                pos_hint={"x": x_pos, "y": 0.62 - row * 0.13},
                 background_color=(*color[:3], 0.8),
                 font_size="18sp"
             )
@@ -560,7 +570,7 @@ class SetupColorsScreen(Screen):
 
         # Navigation buttons
         back_btn = Button(
-            text="← Back",
+            text="Back",
             size_hint=(0.2, 0.09),
             pos_hint={"x": 0.1, "y": 0.075},
             background_color=(0.5, 0.5, 0.5, 1.0)
@@ -603,8 +613,9 @@ class Homescreen(Screen):
     Shows active reminders and provides navigation to settings.
     """
     
-    def __init__(self, **kwargs):
+    def __init__(self, engine=None, **kwargs):
         """Initialize the homescreen."""
+        self.engine = engine
         super().__init__(**kwargs)
         self.idx = 0  # Current reminder index
         # Ensure default reminders are added if needed
@@ -847,8 +858,12 @@ class Homescreen(Screen):
         (time-triggered, test-in-10, or manual next). Per-reminder face customizations
         are applied here only, not on the default view.
         """
-        # Get accent color from reminder or use default
-        accent = reminder.get("accent", config_manager.get("default_colors.primary", [0.10, 0.90, 1.00, 1.0]))
+        # Get accent color from reminder or use default.
+        # Note: we later override accent for built-in habits to keep colors deterministic.
+        accent = reminder.get(
+            "accent",
+            config_manager.get("default_colors.primary", [0.10, 0.90, 1.00, 1.0]),
+        )
         if isinstance(accent, list):
             accent = tuple(accent)
         
@@ -885,16 +900,44 @@ class Homescreen(Screen):
         if not action and reminder.get("text"):
             # Infer action from text for default reminders saved before "action" existed
             t = reminder["text"].lower()
-            if "drink" in t or "water" in t:
+            if "drink" in t or "water" in t or "hydration" in t:
                 action = "drink"
             elif "stretch" in t:
                 action = "stretch"
+            elif "posture" in t:
+                action = "stretch"
+            elif "short break" in t or ("break" in t and "short" in t):
+                action = "walk"
+            elif "grateful" in t or "gratitude" in t or "think about" in t or "thank" in t:
+                action = "think"
+        if not action:
+            action = "wave"
+
+        # Override built-in reminder colors so each habit has a unique fixed palette,
+        # independent of what older saved reminders stored in `accent`.
+        rem_text = (reminder.get("text") or "").strip().lower()
+        act_hint = (action or "").strip().lower()
+        try:
+            if "water" in rem_text or "hydration" in rem_text or act_hint == "drink":
+                accent = tuple(_habit_preset_by_key("drink_water")["accent"])
+            elif "posture" in rem_text or (act_hint == "stretch" and "posture" in rem_text):
+                accent = tuple(_habit_preset_by_key("fix_posture")["accent"])
+            elif act_hint == "walk" or ("short" in rem_text and "break" in rem_text):
+                accent = tuple(_habit_preset_by_key("short_break")["accent"])
+            elif "grateful" in rem_text or "gratitude" in rem_text or "thank" in rem_text or act_hint == "think":
+                accent = tuple(_habit_preset_by_key("gratitude")["accent"])
+            elif act_hint == "stretch":
+                # Default stretch (not posture) -> yellow-ish.
+                accent = tuple(_habit_preset_by_key("stretch")["accent"])
+        except Exception:
+            # Fall back to whatever accent we computed from saved reminder/default.
+            pass
         icon_path = reminder.get("icon_path")
         icon_text = reminder.get("icon", "")
         
         icon_shown = False
         # Prefer Kivy-drawn stick figure when reminder has action (no image file needed)
-        if action in ("drink", "stretch") and hasattr(self, "stick_figure_icon"):
+        if action in ("drink", "stretch", "wave", "walk", "think") and hasattr(self, "stick_figure_icon"):
             self.stick_figure_icon.accent = tuple(accent) if isinstance(accent, (list, tuple)) else (0.10, 0.90, 1.00, 1.0)
             self.stick_figure_icon.action = action
             self.stick_figure_icon.opacity = 1.0
@@ -942,16 +985,35 @@ class Homescreen(Screen):
         self.face.set_style(accent, mood)
         self.draw_bar(accent)
         
-        # Display reminder text (nullable)
-        title = reminder.get("text", "Reminder")
-        self.title.text = f"[b]{icon_text} {title}[/b]" if icon_text else f"[b]{title}[/b]"
-        # Use description if available, otherwise use text as line
-        description = reminder.get("description")
-        if description:
-            self.line.text = description
-        else:
-            # Fallback: show text in line if no description
-            self.line.text = reminder.get("text", "")
+        # Display reminder caption (friendly prefix).
+        raw_title = (reminder.get("text", "Reminder") or "").strip()
+        friendly_title = f"Friendly reminder to {raw_title.lower()}" if raw_title else "Friendly reminder"
+        self.title.text = (
+            f"[b]{icon_text} {friendly_title}[/b]" if icon_text else f"[b]{friendly_title}[/b]"
+        )
+
+        # Subtext (description) must not repeat the reminder text.
+        raw_subtext = (reminder.get("description") or "").strip()
+        if not raw_subtext or (raw_title and raw_subtext.lower() == raw_title.lower()):
+            t = raw_title.lower() if raw_title else ""
+            action_hint = (reminder.get("action") or "").strip().lower()
+            if "drink" in t or "water" in t or "hydration" in t:
+                raw_subtext = "Stay hydrated!"
+            elif "posture" in t:
+                raw_subtext = "Sit tall and relax your shoulders."
+            elif "short break" in t or ("break" in t and "short" in t):
+                raw_subtext = "Stand up, breathe, and reset."
+            elif "grateful" in t or "gratitude" in t or "think about" in t or "thank" in t:
+                raw_subtext = "Name one thing you're grateful for."
+            elif "stretch" in t or "get up" in t or "yoga" in t:
+                raw_subtext = "Relax your body, move gently."
+            elif action_hint == "walk":
+                raw_subtext = "Stand up, breathe, and reset."
+            elif action_hint == "think":
+                raw_subtext = "Name one thing you're grateful for."
+            else:
+                raw_subtext = "Take a brief pause and focus on your habit."
+        self.line.text = raw_subtext
     
     def dismiss(self):
         """Dismiss current reminder overlay."""
@@ -1054,7 +1116,28 @@ class Homescreen(Screen):
             # Remember where to return after 1 minute
             self._return_screen = self.manager.current
             self.manager.current = "homescreen"
-            self.trigger_reminder(reminder, is_real_trigger=True)
+            # Alternate reminder caption text (non-repetitive UI).
+            display_reminder = reminder
+            text_variants = reminder.get("text_variants")
+            if isinstance(text_variants, list) and len(text_variants) > 0:
+                # Persist a per-reminder index so alternation survives repeats/reboots.
+                idx_map = config_manager.get("reminder_text_variant_index", {})
+                if not isinstance(idx_map, dict):
+                    idx_map = {}
+                cur_idx = idx_map.get(reminder_id, -1)
+                try:
+                    next_idx = (int(cur_idx) + 1) % len(text_variants)
+                except Exception:
+                    next_idx = 0
+                idx_map[reminder_id] = next_idx
+                config_manager.set("reminder_text_variant_index", idx_map)
+
+                chosen = text_variants[next_idx]
+                # Ensure both title and bottom line correlate with the animation.
+                display_reminder = dict(reminder)
+                display_reminder["text"] = chosen
+
+            self.trigger_reminder(display_reminder, is_real_trigger=True)
             
             # Mark as fired (use timestamp for interval, minute string for time-based)
             if trigger_type == "Every X Minutes":
@@ -1209,7 +1292,7 @@ class SettingsScreen(Screen):
         
         # Return to Homescreen button
         home_btn = Button(
-            text="← Return to Homescreen",
+            text="Return to Homescreen",
             size_hint=(0.4, 0.10),
             pos_hint={"center_x": 0.5, "y": 0.20},
             font_size="20sp",
@@ -1237,18 +1320,48 @@ HEALTHY_HABIT_PRESETS = (
         "description": "Stay hydrated!",
         "action": "drink",
         "icon_path": "assets/icons/drink_water.png",
-        "accent": [0.10, 0.90, 1.00, 1.0],
+        "accent": [0.10, 0.65, 1.00, 1.0],
         "mood": "happy",
     },
     {
         "key": "stretch",
         "label": "Get up and stretch",
         "text": "Get up and stretch",
-        "description": "Take a break and move around",
+        "description": "Take a break and move around.",
         "action": "stretch",
         "icon_path": "assets/icons/stretch.png",
-        "accent": [0.15, 1.00, 0.55, 1.0],
+        "accent": [1.00, 0.82, 0.20, 1.0],
         "mood": "calm",
+    },
+    {
+        "key": "fix_posture",
+        "label": "Fix your posture",
+        "text": "Fix your posture",
+        "description": "Sit tall and relax your shoulders.",
+        "action": "stretch",
+        "icon_path": None,
+        "accent": [0.20, 0.85, 0.40, 1.0],
+        "mood": "calm",
+    },
+    {
+        "key": "short_break",
+        "label": "Take a short break",
+        "text": "Take a short break",
+        "description": "Stand up, breathe, and reset.",
+        "action": "walk",
+        "icon_path": None,
+        "accent": [0.68, 0.45, 1.00, 1.0],
+        "mood": "happy",
+    },
+    {
+        "key": "gratitude",
+        "label": "Gratitude check",
+        "text": "Think about something you're grateful for",
+        "description": "Name one thing you're grateful for.",
+        "action": "think",
+        "icon_path": None,
+        "accent": [1.00, 0.41, 0.71, 1.0],
+        "mood": "happy",
     },
 )
 
@@ -1450,18 +1563,30 @@ class ReminderEditScreen(Screen):
             size_hint_x=0.3,
             text_size=(None, None)
         )
-        self.interval_input = TextInput(
-            text="30",
-            multiline=False,
+        self.interval_minutes_value = 30
+        self.interval_dropdown = DropDown()
+        self.interval_btn = Button(
+            text=str(self.interval_minutes_value),
             size_hint_x=0.3,
             font_size="18sp",
-            background_color=(0.15, 0.15, 0.20, 1.0),
-            foreground_color=(1, 1, 1, 1),
-            padding=dp(10),
-            disabled=False,
+            background_color=(0.15, 0.35, 0.7, 1.0),
+            background_normal="",
+            background_down="",
+            color=(1, 1, 1, 1),
+            disabled=True,  # Enabled only when "Every X Minutes" is selected
         )
+        for mins in [5, 10, 15, 20, 30, 45, 60]:
+            btn = Button(
+                text=str(mins),
+                size_hint_y=None,
+                height=dp(40),
+                font_size="16sp",
+            )
+            btn.bind(on_release=lambda b, m=mins: self.select_interval_minutes(m))
+            self.interval_dropdown.add_widget(btn)
+        self.interval_btn.bind(on_release=self.interval_dropdown.open)
         interval_container.add_widget(interval_label)
-        interval_container.add_widget(self.interval_input)
+        interval_container.add_widget(self.interval_btn)
         interval_container.add_widget(Widget())  # Spacer
         form_layout.add_widget(interval_container)
         
@@ -1602,7 +1727,9 @@ class ReminderEditScreen(Screen):
         self._habit_key = HEALTHY_HABIT_PRESETS[0]["key"]
         self.habit_btn.text = _habit_preset_by_key(self._habit_key)["label"]
         self._reminder_icon_text = None
-        self.interval_input.text = "30"
+        self.interval_minutes_value = 30
+        if hasattr(self, "interval_btn") and self.interval_btn:
+            self.interval_btn.text = "30"
         self.time_input.text = "12:00"
         self.am_pm_btn.text = "PM"
         self.repeat_btn.text = "daily"
@@ -1624,7 +1751,9 @@ class ReminderEditScreen(Screen):
             trigger_type = reminder.get("trigger_type", "Specific Time")
             self.select_trigger_type(trigger_type)
             if trigger_type == "Every X Minutes":
-                self.interval_input.text = str(reminder.get("interval_minutes", 30))
+                self.interval_minutes_value = int(reminder.get("interval_minutes", 30))
+                if hasattr(self, "interval_btn") and self.interval_btn:
+                    self.interval_btn.text = str(self.interval_minutes_value)
             else:
                 stored_time = reminder.get("trigger_time", "12:00")
                 display_12h, display_am_pm = self._time_24h_to_12h_display(stored_time)
@@ -1684,17 +1813,23 @@ class ReminderEditScreen(Screen):
         if stored == "Every X Minutes":
             self.time_input.disabled = True
             self.am_pm_btn.disabled = True
-            self.interval_input.disabled = False
+            self.interval_btn.disabled = False
             self.repeat_container.height = 0
             self.repeat_container.opacity = 0
             self.repeat_container.disabled = True
         else:
             self.time_input.disabled = False
             self.am_pm_btn.disabled = False
-            self.interval_input.disabled = True
+            self.interval_btn.disabled = True
             self.repeat_container.height = dp(50)
             self.repeat_container.opacity = 1
             self.repeat_container.disabled = False
+
+    def select_interval_minutes(self, minutes: int) -> None:
+        """Select interval minutes from dropdown (used for Every X Minutes)."""
+        self.interval_dropdown.dismiss()
+        self.interval_minutes_value = int(minutes)
+        self.interval_btn.text = str(self.interval_minutes_value)
 
     def select_repeat(self, option):
         """Handle repeat selection."""
@@ -1706,7 +1841,7 @@ class ReminderEditScreen(Screen):
         trigger_type = self._trigger_type_stored
         if trigger_type == "Every X Minutes":
             try:
-                interval_minutes = int(self.interval_input.text.strip())
+                interval_minutes = int(getattr(self, "interval_minutes_value", 30))
                 if interval_minutes < 1 or interval_minutes > 1440:
                     raise ValueError
                 trigger_time = None
@@ -1776,7 +1911,7 @@ class ReminderEditScreen(Screen):
         repeat_settings = "daily"
         if trigger_type == "Every X Minutes":
             try:
-                interval_minutes = int(self.interval_input.text.strip())
+                interval_minutes = int(getattr(self, "interval_minutes_value", 30))
                 interval_minutes = max(1, min(1440, interval_minutes))
             except ValueError:
                 interval_minutes = 30
@@ -1890,6 +2025,29 @@ class RemindersScreen(Screen):
             pos_hint={"x": 0, "y": 0.90}
         )
         layout.add_widget(title)
+
+        # Audible reminder toggle (voice UI only).
+        voice_enabled = bool(config_manager.get("voice_reminders_enabled", True))
+        voice_btn = ToggleButton(
+            text=f"Speak reminders: {'ON' if voice_enabled else 'OFF'}",
+            state="down" if voice_enabled else "normal",
+            size_hint=(1, 0.08),
+            pos_hint={"x": 0, "y": 0.80},
+            font_size="18sp",
+            background_color=(0.2, 0.7, 0.3, 1.0) if voice_enabled else (0.5, 0.5, 0.5, 1.0),
+            background_normal="",
+            background_down="",
+            color=(1, 1, 1, 1),
+        )
+
+        def _on_voice_toggle(_inst, state_val):
+            enabled = state_val == "down"
+            config_manager.set("voice_reminders_enabled", enabled)
+            voice_btn.text = f"Speak reminders: {'ON' if enabled else 'OFF'}"
+            voice_btn.background_color = (0.2, 0.7, 0.3, 1.0) if enabled else (0.5, 0.5, 0.5, 1.0)
+
+        voice_btn.bind(state=_on_voice_toggle)
+        layout.add_widget(voice_btn)
         
         # ScrollView wrapping the reminder list (fits 800x480; scroll when many reminders)
         scroll = ScrollView(

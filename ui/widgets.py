@@ -336,6 +336,10 @@ class StickFigureIcon(Widget):
             self._draw_drink(px, w, h, line_w, ph)
         elif act == "stretch":
             self._draw_stretch(px, w, h, line_w, ph)
+        elif act == "walk":
+            self._draw_walk(px, w, h, line_w, ph)
+        elif act == "think":
+            self._draw_think(px, w, h, line_w, ph)
         else:
             self._draw_wave(px, w, h, line_w, ph)
 
@@ -491,3 +495,115 @@ class StickFigureIcon(Widget):
         )
         self.canvas.add(Line(points=px(cx, cy - 0.12) + px(cx - 0.10, cy - 0.38), width=line_w, cap="round"))
         self.canvas.add(Line(points=px(cx, cy - 0.12) + px(cx + 0.10, cy - 0.38), width=line_w, cap="round"))
+
+    def _draw_walk(self, px, w, h, line_w, ph):
+        """Walking pose with alternating arm/leg swing."""
+        cx, cy = 0.5, 0.5
+        head_r = 0.08
+        swing = 0.11 * sin(ph * 1.8)
+        bob = 0.018 * sin(ph * 3.6)
+
+        # Head + torso
+        self.canvas.add(Color(1, 1, 1, 0.95))
+        self.canvas.add(
+            Ellipse(
+                pos=px(cx - head_r, cy + 0.25 - head_r + bob),
+                size=(2 * head_r * w, 2 * head_r * h),
+            )
+        )
+        shoulder = (cx, cy + 0.14 + bob)
+        hip = (cx, cy - 0.12 + bob)
+        self.canvas.add(Line(points=px(*shoulder) + px(*hip), width=line_w, cap="round"))
+
+        # Arms: opposite swing for natural walk cycle
+        l_hand = (cx - 0.11 - swing, cy + 0.02 + bob)
+        r_hand = (cx + 0.11 + swing, cy + 0.02 + bob)
+        self.canvas.add(Line(points=px(*shoulder) + px(*l_hand), width=line_w, cap="round"))
+        self.canvas.add(Line(points=px(*shoulder) + px(*r_hand), width=line_w, cap="round"))
+
+        # Legs: opposite swing with subtle knee bend
+        l_knee = (cx - 0.03 - 0.45 * swing, cy - 0.26 + bob)
+        l_foot = (cx - 0.09 - swing, cy - 0.40 + bob)
+        r_knee = (cx + 0.03 + 0.45 * swing, cy - 0.26 + bob)
+        r_foot = (cx + 0.09 + swing, cy - 0.40 + bob)
+        self.canvas.add(Line(points=px(*hip) + px(*l_knee) + px(*l_foot), width=line_w, cap="round"))
+        self.canvas.add(Line(points=px(*hip) + px(*r_knee) + px(*r_foot), width=line_w, cap="round"))
+
+    def _draw_think(self, px, w, h, line_w, ph):
+        """Thinking pose: visible hand-to-chin and classic thought bubble."""
+        cx, cy = 0.5, 0.5
+        head_r = 0.075
+
+        # Keep motion subtle to avoid awkward full-body sway.
+        bob = 0.006 * sin(ph * 1.2)
+
+        # Head
+        head_cx = cx
+        head_cy = cy + 0.21 + bob
+        self.canvas.add(Color(1, 1, 1, 0.95))
+        self.canvas.add(
+            Ellipse(
+                pos=px(head_cx - head_r, head_cy - head_r),
+                size=(2 * head_r * w, 2 * head_r * h),
+            )
+        )
+
+        # Torso stays mostly upright.
+        shoulder_y = head_cy - head_r * 0.72
+        hip_y = cy - 0.12 + bob
+        shoulder = (cx, shoulder_y)
+        hip = (cx, hip_y)
+        self.canvas.add(Line(points=px(*shoulder) + px(*hip), width=line_w, cap="round"))
+
+        # Right arm: shoulder -> elbow -> hand on chin (explicit hand marker).
+        chin_x = cx + 0.02
+        chin_y = head_cy - head_r * 0.20
+        elbow = (cx + 0.10, cy + 0.10 + bob)
+        hand = (cx + 0.045, chin_y)
+        self.canvas.add(
+            Line(
+                points=px(*shoulder) + px(*elbow) + px(*hand),
+                width=line_w,
+                cap="round",
+            )
+        )
+        # Hand dot so it is clearly visible.
+        self.canvas.add(Ellipse(pos=px(hand[0] - 0.012, hand[1] - 0.012), size=(0.024 * w, 0.024 * h)))
+
+        # Left arm relaxed down.
+        self.canvas.add(
+            Line(
+                points=px(*shoulder) + px(cx - 0.11, cy + 0.01 + bob),
+                width=line_w,
+                cap="round",
+            )
+        )
+
+        # Legs stable.
+        self.canvas.add(
+            Line(
+                points=px(*hip) + px(hip[0] - 0.07, cy - 0.22 + bob) + px(hip[0] - 0.05, cy - 0.36 + bob),
+                width=line_w,
+                cap="round",
+            )
+        )
+        self.canvas.add(
+            Line(
+                points=px(*hip) + px(hip[0] + 0.07, cy - 0.22 + bob) + px(hip[0] + 0.05, cy - 0.36 + bob),
+                width=line_w,
+                cap="round",
+            )
+        )
+
+        # Classic thought bubble: cloud-like circles + trailing dots.
+        bubble_cx = cx + 0.24
+        bubble_cy = cy + 0.31 + 0.008 * sin(ph * 1.3)
+        self.canvas.add(Color(1, 1, 1, 0.92))
+        self.canvas.add(Ellipse(pos=px(bubble_cx - 0.11, bubble_cy - 0.05), size=(0.14 * w, 0.08 * h)))
+        self.canvas.add(Ellipse(pos=px(bubble_cx - 0.03, bubble_cy - 0.07), size=(0.16 * w, 0.10 * h)))
+        self.canvas.add(Ellipse(pos=px(bubble_cx + 0.06, bubble_cy - 0.05), size=(0.14 * w, 0.08 * h)))
+        self.canvas.add(Ellipse(pos=px(bubble_cx - 0.01, bubble_cy - 0.00), size=(0.20 * w, 0.10 * h)))
+
+        self.canvas.add(Color(0.86, 0.90, 0.97, 0.85))
+        self.canvas.add(Ellipse(pos=px(cx + 0.14, cy + 0.17), size=(0.028 * w, 0.020 * h)))
+        self.canvas.add(Ellipse(pos=px(cx + 0.10, cy + 0.14), size=(0.020 * w, 0.015 * h)))
